@@ -1311,15 +1311,28 @@ function deploy_stand_config() {
         run_cmd "pveum acl modify '/pool/$pool_name' --users '$username' --roles 'PVEAuditor' --propagate 'false'"
     }
 
-    for elem in $(printf '%s\n' "${!config_var[@]}" | grep -P '^[^_]' | sort); do
+    local cmd_line netifs_type='virtio' netifs_mac disk_type='scsi' disk_num=0 boot_order vm_template vm_name
+    local -A vm_config=()
 
-        local cmd_line=''
-        local netifs_type='virtio'
-        local disk_type='scsi'
-        local disk_num=0
-        local boot_order=''
-        local -A vm_config=()
-        local cmd_line="qm create '$vmid' --name '$elem' --pool '$pool_name'"
+    for elem in $(printf '%s\n' "${!config_var[@]}" | grep -P 'vm_\d+' | sort -V ); do
+
+        netifs_type='virtio'
+        netifs_mac=''
+        disk_type='scsi'
+        disk_num=0
+        boot_order=''
+        vm_config=()
+        vm_template="$( get_dict_value config_stand_${opt_sel_var}_var[$elem] config_template )"
+
+        [[ "$vm_template" != '' ]] && {
+            [[ -v "config_templates[$vm_template]" ]] || { echo_err "Ошибка: шаблон конфигурации '$vm_template' для ВМ '$elem' не найден. Выход"; exit_clear; }
+            get_dict_config "config_templates[$vm_template]" vm_config
+        }
+        get_dict_config "config_stand_${opt_sel_var}_var[$elem]" vm_config
+        vm_name="${vm_config[name]}"
+        unset 'vm_config[name]' 'vm_config[os_descr]' 'vm_config[templ_descr]' 'vm_config[config_template]'
+
+        [[ "$vm_name" == '' ]] && vm_name="$elem"
 
         get_dict_config "config_stand_${opt_sel_var}_var[$elem]" vm_config
 
