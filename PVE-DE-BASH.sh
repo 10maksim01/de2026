@@ -386,6 +386,46 @@ function show_help() {
 EOL
 }
 
+function pve_api_request() {
+    [[ "$2" == '' || "$3" == '' ]] && { echo_err 'Ошибка: нет подходящих аргументов или токена для pve_api_request'; configure_api_token clear force; exit_clear; }
+    [[ "$var_pve_api_curl" == '' ]] && {
+        configure_api_token init;
+        [[ "$var_pve_api_curl" == '' ]] && { echo_err 'Ошибка: не удалось получить API токен для pve_api_request'; configure_api_token clear force; exit_clear; }
+    }
+    local http_code i
+    for i in "${@:4}"; do http_code+=( --data-urlencode "$i" ); done
+    [[ "$1" != '' ]] && local -n ref_result=$1 || local ref_result
+
+    ref_result=$( "${var_pve_api_curl[@]}" "${config_base[pve_api_url]}${3}" -X "${2}" "${http_code[@]}" )
+
+    case $? in
+        0|22) [[ "$ref_result" =~ (.*)$'\n'([0-9]{3})$ ]] || { echo_err "Ошибка pve_api_request: не удалось узнать HTTP_CODE"; configure_api_token clear force; exit_clear; }
+              ref_result=${BASH_REMATCH[1]}
+              http_code=${BASH_REMATCH[2]}
+              [[ $http_code -lt 300 ]] && return 0
+              [[ $http_code == 401 ]] && {
+                    [[ "$pve_api_request_exit" == 1 ]] && return 1
+					configure_api_token clear force
+					configure_api_token init
+                    local pve_api_request_exit=1
+					pve_api_request "$@"
+                    return $?
+              }
+              ! [[ $http_code =~ ^(400|500|501|596)$ ]] && {
+                    echo_err "Ошибка: запрос к API был обработан с ошибкой: ${c_val}${*:2}"
+                    echo_err "API токен: ${c_val}${var_pve_token_id}"
+                    echo_err "HTTP код ответа: ${c_val}$http_code"
+                    echo_err "Ответ сервера: ${c_val}$( echo -n "$res" | awk 'NF>0{if (n!=1) {printf $0;n=1;next}; printf "\n"$0 }' )"
+                    exit_clear
+              }
+              return $http_code;;
+        7|28) echo_err "Ошибка: не удалось подключиться к PVE API. PVE запущен/работает?";;
+        2)    echo_err "Ошибка: неизвестная опция curl. Старая версия?";;
+        *)    echo_err "Ошибка: не удалось выполнить запрос к API: ${c_val}${*:2}${c_err}. Токен ${c_val}${var_pve_token_id}${c_err}. Код ошибки curl: ${c_val}$?";;
+    esac
+    configure_api_token clear force
+    exit_clear
+}
 
 function show_config() {
     local i=0
