@@ -570,12 +570,12 @@ function get_file() {
         else
             norm_filename=$( echo -n "$url" | sed 's/^.*\///;s/[^a-zA-Z0-9_.-]/_/g' | grep -Pio '^.*?(?=([-._]pve[-._]asdac([-._]bash)?|).iso$)' )
             norm_filename+='.PVE-ASDaC.iso'
-            [[ "$url" == "$sel_iso_storage_path/template/iso/"* ]] && norm_filename=$( echo -n "$url" | grep -Po '.*/\K.*' )
+            [[ "$url" == "$sel_iso_storage_path/home/fptuser/"* ]] && norm_filename=$( echo -n "$url" | grep -Po '.*/\K.*' )
         fi
         [[ ${#norm_filename} -eq 0 ]] && { echo_err "Ошибка $FUNCNAME: некорректное имя файла для ISO тип файла: '$filename'"; exit_clear; }
         [[ ${#norm_filename} -gt 200 ]] && { echo_err "Ошибка $FUNCNAME: имя файла ISO '$filename' больше 200 символов"; exit_clear; }
 
-        filename="$sel_iso_storage_path/template/iso/$norm_filename"
+        filename="$sel_iso_storage_path/home/fptuser/$norm_filename"
     fi
 
     if $is_url; then
