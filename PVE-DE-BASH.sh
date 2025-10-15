@@ -30,6 +30,9 @@ declare -A config_base=(
     [_storage]='Хранилище для развертывания дисков ВМ'
     [storage]='{auto}'
 
+	[_iso_storage]='Хранилище для образов ISO'
+    [iso_storage]='{auto}'
+
     [_pool_name]='Шаблон имени пула стенда'
     [_def_pool_name]='Шаблон имени пула стенда по умолчанию'
     [def_pool_name]='PROF39_stand_{0}'
@@ -907,7 +910,8 @@ function descr_string_check() {
 
 
 function configure_storage() {
-    [[ "$1" == check-only ]] && [[ "${config_base[storage]}" == '{auto}' || "${config_base[storage]}" == '{manual}' ]] && return 0
+   [[ "$1" == check-only ]] && [[ "${config_base[storage]}" == '{auto}' || "${config_base[storage]}" == '{manual}' ]]  \
+        && [[ "${config_base[iso_storage]}" == '{auto}' || "${config_base[iso_storage]}" == '{manual}' ]] && return 0
     set_storage() {
             echo $'\nСписок доступных хранилищ:'
             echo "$pve_storage_list" | awk -F' ' 'BEGIN{split("К|М|Г|Т",x,"|")}{for(i=1;$2>=1024&&i<length(x);i++)$2/=1024;printf("%s\t%s\t%s\t%3.1f %sБ\n",NR,$1,$3,$2,x[i]) }' \
@@ -1239,7 +1243,7 @@ function deploy_stand_config() {
             }
             local file="$2"
             get_file file '' iso || exit_clear
-            cmd_line+=" --${disk_type}${disk_num} '${config_base[storage]}:iso/$file,media=cdrom'"
+            cmd_line+=" --${disk_type}${disk_num} '${config_base[iso_storage]}:iso/$file,media=cdrom'"
 
         fi
         ((disk_num++))
@@ -1460,6 +1464,7 @@ function install_stands() {
                 pool_name) configure_poolname set install exit false; continue;;
                 access_user_name) configure_username set install exit false; continue;;
                 storage) config_base[storage]='{manual}'; configure_storage install; continue;;
+				iso_storage) config_base[iso_storage]='{manual}'; configure_storage iso; continue;;
                 inet_bridge) configure_wan_vmbr manual; continue;;
                 take_snapshots|access_create|access_user_enable|run_vm_after_installation) config_base[$opt]=$( invert_bool ${config_base[$opt]} ); continue;;
                 dry-run) opt_dry_run=$( invert_bool $opt_dry_run ); continue;;
@@ -1985,6 +1990,7 @@ while [ $# != 0 ]; do
                 -dir|--mk-tmpfs-dir)    check_arg "$2"; config_base[mk_tmpfs_imgdir]="$2"; shift;;
                 -norm|--no-clear-tmpfs) opt_rm_tmpfs=false;;
                 -st|--storage)          check_arg "$2"; config_base[storage]="$2"; shift;;
+				-iso|--iso-storage)     check_arg "$2"; config_base[iso_storage]="$2"; shift;;
                 -pn|--pool-name)        check_arg "$2"; config_base[pool_name]="$2"; shift;;
                 -snap|--take-snapshots) check_arg "$2"; config_base[take_snapshots]="$2"; shift;;
                 -inst-start-vms|--run-vm-after-installation) check_arg "$2"; config_base[run_vm_after_installation]="$2"; shift;;
