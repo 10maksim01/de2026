@@ -1314,12 +1314,11 @@ function deploy_stand_config() {
     local pool_name="${config_base[pool_name]/\{0\}/$stand_num}"
 
     local pve_net_ifs=''
-    pve_api_request pve_net_ifs GET /nodes/$var_pve_node/network || { echo_err "Ошибка: не удалось загрузить список сетевых интерфейсов"; exit_clear; }
-    pve_net_ifs=$( echo -n "$pve_net_ifs" | grep -Po '({|,)"iface":"\K[^"]+' )
+    parse_noborder_table 'pvesh get /nodes/$( hostname -s )/network' pve_net_ifs iface
 
-    run_cmd /noexit pve_api_request return_cmd POST /pools "'poolid=$pool_name' 'comment=${config_base[pool_desc]/\{0\}/$stand_num}'" || { echo_err "Ошибка: не удалось создать пул '$pool_name'"; exit_clear; }
-    run_cmd pve_api_request return_cmd PUT /access/acl "'path=/pool/$pool_name' 'groups=$stands_group' roles=NoAccess  propagate=0"
-    echo_ok "Создан пул стенда ${c_val}$pool_name"
+    run_cmd /noexit "pveum pool add '$pool_name' --comment '${config_base[pool_desc]/\{0\}/$stand_num}'" || { echo_err "Ошибка: не удалось создать пул '$pool_name'"; exit 1; }
+    run_cmd "pveum acl modify '/pool/$pool_name' --propagate 'false' --groups '$stands_group' --roles 'NoAccess'"
+
 
     ${config_base[access_create]} && {
         local username="${config_base[access_user_name]/\{0\}/$stand_num}@pve"
