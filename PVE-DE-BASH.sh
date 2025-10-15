@@ -3,11 +3,10 @@ ex() { ((ex_var++)); echo -n $'\e[m' >> /dev/tty; [[ "$ex_var" == 1 ]] && config
 
 trap ex INT
 
-# Запуск:               sh='PVE-ASDaC-BASH.sh';curl -sOLH 'Cache-Control: no-cache' "https://raw.githubusercontent.com/PavelAF/PVE-ASDaC-BASH/main/$sh"&&chmod +x $sh&&./$sh;rm -f $sh
-
 echo $'\nProxmox VE Automatic stand deployment and configuration script by AF\n' >> /dev/tty
 
 ############################# -= Конфигурация =- #############################
+shopt -s extglob
 
 # Необходимые команды для работы на скрипта
 script_requirements_cmd=( curl qm pvesh pvesm pveum qemu-img kvm md5sum )
@@ -63,7 +62,7 @@ declare -A config_base=(
     [access_user_enable]=true
 
     [_access_pass_length]='Длина создаваемых паролей для пользователей'
-    [access_pass_length]=5
+    [access_pass_length]=8
 
     [_access_pass_chars]='Используемые символы в паролях [regex]'
     [access_pass_chars]='A-Z0-9'
@@ -1316,7 +1315,7 @@ function deploy_stand_config() {
 
         for opt in $(printf '%s\n' "${!vm_config[@]}" | sort); do
             case "$opt" in
-                startup|tags|ostype|serial0|serial1|serial2|serial3|agent|scsihw|cpu|cores|memory|bios|bwlimit|description|args|arch|vga|kvm|rng0|acpi|tablet|reboot)
+                startup|tags|ostype|serial[0-3]|agent|scsihw|cpu|cores|memory|bwlimit|description|args|arch|vga|kvm|rng0|acpi|tablet|reboot|startdate|tdf|cpulimit|cpuunits|balloon|hotplug)
                     cmd_line+=" --$opt '${vm_config[$opt]}'";;
                 network*) set_netif_conf "$opt" "${vm_config[$opt]}";;
                 boot_disk*|disk*) set_disk_conf "$opt" "${vm_config[$opt]}";;
