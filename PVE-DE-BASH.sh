@@ -715,12 +715,6 @@ function show_config() {
     [[ "$1" != opt_verbose ]] && echo
 }
 
-function del_vmconfig() {
-    for conf in $(compgen -v | grep -P '^_?config_stand_[1-9][0-9]{0,3}_var$' | awk '{if (NR>1) printf " ";printf $0}'); do
-        unset $conf
-    done
-}
-
 function isurl_check() {
     [[ "$2" != "yadisk" ]] && local other_proto='?|ftp'
     [[ $(echo "$1" | grep -Pci '(*UCP)\A(https'$other_proto')://[-[:alnum:]\+&@#/%?=~_|!:,.;]*[-[:alnum:]\+&@#/%=~_|]\Z' ) == 1 ]] && return 0
