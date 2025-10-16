@@ -1301,7 +1301,7 @@ function deploy_stand_config() {
             }
             local file="$2"
             get_file file '' iso || exit_clear
-            cmd_line+=" --${disk_type}${disk_num} '${config_base[iso_storage]}:iso/$file,media=cdrom'"
+            cmd_line+=" --${disk_type}${disk_num} '${config_base[storage]}:iso/$file,media=cdrom'"
 
         fi
         ((disk_num++))
