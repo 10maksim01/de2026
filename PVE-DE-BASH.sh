@@ -3,14 +3,14 @@ ex() { ((ex_var++)); echo -n $'\e[m' >> /dev/tty; [[ "$ex_var" == 1 ]] && config
 
 trap ex INT
 
+# Запуск:               sh='PVE-ASDaC-BASH.sh';curl -sOLH 'Cache-Control: no-cache' "https://raw.githubusercontent.com/PavelAF/PVE-ASDaC-BASH/main/$sh"&&chmod +x $sh&&./$sh;rm -f $sh
+
 echo $'\nProxmox VE Automatic stand deployment and configuration script by AF\n' >> /dev/tty
 
 ############################# -= Конфигурация =- #############################
 
-shopt -s extglob
-
 # Необходимые команды для работы на скрипта
-script_requirements_cmd=( grep sed awk curl qm pvesh pvesm pveum qemu-img kvm md5sum sha256sum)
+script_requirements_cmd=( curl qm pvesh pvesm pveum qemu-img kvm md5sum )
 
 # Приоритет параметров: значения в этом файле -> значения из импортированного файла конфигурации -> переопределенные значения из аргуметов командной строки
 
@@ -348,24 +348,6 @@ function parse_noborder_table() {
 }
 
 # Объявление основных функций
-function configure_clear() {
-    ! $opt_not_tmpfs && {
-        local lower_nextid
-        pve_api_request lower_nextid GET /cluster/options
-        lower_nextid=$( echo -n "$lower_nextid" | grep -Po '({|,)"next-id":{([^{}\[\]]*?,)?"lower":"\K\d+' )
-        [[ "$lower_nextid" != '' &&  "$lower_nextid" == "$(( ${config_base[start_vmid]} + ${#opt_stand_nums[@]} * 100 ))" ]] && run_cmd pve_api_request return_cmd PUT /cluster/options delete=next-id
-        ex_var=0
-        opt_not_tmpfs=true
-        configure_imgdir clear force
-    }
-}
-
-function exit_clear() { 
-    ((ex_var++))
-    [[ "$ex_var" == 1 ]] && configure_clear
-    echo $'\e[m' > /dev/tty
-    exit ${1-1}
-}
 
 function show_help() {
     local t=$'\t'
@@ -546,28 +528,6 @@ function get_url_filesize() {
 function get_url_filename() {
     isurl_check "$1" || { echo_err "Ошибка get_url_filename: указанный URL '$1' не является валидным. Выход"; exit 1; }
     local return=$( curl -L --head -w '%{url_effective}' "$1" 2>/dev/null | tail -n1 )
-}
-
-function jq_data_to_array() {
-	[[ "$1" == '' || "$2" == '' ]] && exit_clear
-	
-	local data line var_line i=0
-	set -o pipefail
-	data=$( echo -n "$data" | grep -Po '(?(DEFINE)(?<str>"[^"\\]*(?:\\.[^"\\]*)*")(?<other>null|true|false|[0-9\-\.Ee\+]+)(?<arr>\[[^\[\]]*+(?:(?-1)[^\[\]]*)*+\])(?<obj>{[^{}]*+(?:(?-1)[^{}]*)*+}))(?:^\s*{\s*(?:(?&str)\s*:\s*(?:(?&other)|(?&str)|(?&arr)|(?&obj))\s*,\s*)*?"data"\s*:\s*(?:\[|(?={))|\G\s*,\s*)(?:(?:(?&other)|(?&str)|(?&arr))\s*,\s*)*\K(?>(?&obj)|)(?=\s*(?:\]|})|\s*,[^,])' ) \
-        || { echo_err "Ошибка jq_data_to_array: не удалось получить корректные JSON данные от API: ${c_val}GET '$1'"$'\n'"API_DATA: $data"; exit_clear; }
-	
-    local -n ref_dict_table=$2
-    [[ "${#data}" == 0 ]] && { ref_dict_table[count]=0; return 0; }
-
-	while read -r line || [[ -n $line ]]; do
-		while read -r var_line || [[ -n $var_line ]]; do
-			[[ "$var_line" =~ ^\"([^\"\\]*(\\.[^\"\\]*)*)\"\ *:\ *\"?(.*[^\"]|) ]] || { echo_err "Ошибка parse_json: некорректный bash парсинг: ${c_val}'$var_line'"; exit_clear; }
-			ref_dict_table[$i,${BASH_REMATCH[1]}]=${BASH_REMATCH[3]}
-		done < <( echo -n "$line" | grep -Po '(?(DEFINE)(?<str>"[^"\\]*(?:\\.[^"\\]*)*")(?<other>null|true|false|[0-9\-\.Ee\+]+)(?<arr>\[[^\[\]]*+(?:(?-1)[^\[\]]*)*+\])(?<obj>{[^{}]*+(?:(?-1)[^{}]*)*+}))(?:^\s*{\s*|\G\s*,\s*)\K(?:(?&str)\s*:\s*(?:(?&other)|(?&str)|(?&arr)|(?&obj)))(?=\s*}|\s*,[^,])' || { echo_err "Ошибка jq_data_to_array: ошибка парсинга ответа API: ${c_val}GET '$1'"$'\n'"Line $i: $line"; exit_pid; } )
-        ((i++))
-    done <<<$data
-	set +o pipefail
-    ref_dict_table[count]=$i
 }
 
 function get_file() {
@@ -947,61 +907,39 @@ function descr_string_check() {
 
 
 function configure_storage() {
-    [[ "$1" == check-only ]] && [[ "${config_base[storage]}" == '{auto}' || "${config_base[storage]}" == '{manual}' ]]  \
-        && [[ "${config_base[iso_storage]}" == '{auto}' || "${config_base[iso_storage]}" == '{manual}' ]] && return 0
+    [[ "$1" == check-only ]] && [[ "${config_base[storage]}" == '{auto}' || "${config_base[storage]}" == '{manual}' ]] && return 0
     set_storage() {
             echo $'\nСписок доступных хранилищ:'
-            echo "$data_pve_storage_list" | awk -F $'\t' 'BEGIN{split("|К|М|Г|Т",x,"|")}{for(i=1;$3>=1024&&i<length(x);i++)$3/=1024;printf("%s\t%s\t%s\t%3.1f %sБ\n",NR,$1,$2,$3,x[i]) }' \
+            echo "$pve_storage_list" | awk -F' ' 'BEGIN{split("К|М|Г|Т",x,"|")}{for(i=1;$2>=1024&&i<length(x);i++)$2/=1024;printf("%s\t%s\t%s\t%3.1f %sБ\n",NR,$1,$3,$2,x[i]) }' \
             | column -t -s$'\t' -N'Номер,Имя хранилища,Тип хранилища,Свободное место' -o$'\t' -R1
-            config_base[$content_config]=$( read_question_select 'Выберите номер хранилища'  '^[1-9][0-9]*$' 1 $( echo "$data_pve_storage_list" | wc -l ) )
-            config_base[$content_config]=$( echo "$data_pve_storage_list" | awk -F $'\t' -v nr="${config_base[$content_config]}" 'NR==nr{print $1}' )
+            config_base[storage]=$( read_question_select 'Выберите номер хранилища'  '^[1-9][0-9]*$' 1 $(echo -n "$pve_storage_list" | grep -c '^') )
+            config_base[storage]=$(echo "$pve_storage_list" | awk -F' ' -v nr="${config_base[storage]}" 'NR==nr{print $1}')
     }
-	
-	declare -Ag data_pve_node_storages=()
-    local data_pve_storage_list='' content_types='images iso' content_config max_index i
-    jq_data_to_array "/nodes/$var_pve_node/storage?enabled=1&content=${content_types// /'%20'}" data_pve_node_storages
-    [[ $1 == iso || $1 == images ]] && content_types=$1
-    
-    for content_storage in $content_types; do
-        if [[ $content_storage == images ]]; then content_config='storage'; else content_config='iso_storage'; fi
+    pve_storage_list=$( pvesm status --target "$( hostname -s )" --enabled 1 --content images | awk -F' ' 'NR>1{print $1" "$6" "$2}' | sort -k2nr )
 
-        [[ "${data_pve_node_storages[0,storage]}" == '' || "${data_pve_node_storages[0,avail]}" == '' ]] && { echo_err 'Ошибка: не найдено ни одного подходящего PVE хранилища. Выход'; exit_clear; }
+    [[ "$pve_storage_list" == '' ]] && echo_err 'Ошибка: не найдено ни одного активного PVE хранилища для дисков ВМ. Выход' && exit 1
 
-        max_index=${data_pve_node_storages[count]}
-        data_pve_storage_list=''
-        for ((i=0;i<$max_index;i++)); do
-            [[ ${data_pve_node_storages[$i,active]} != 1 || ! ${data_pve_node_storages[$i,content]} =~ (^|,)"$content_storage"(,|$) ]] && continue
-            data_pve_storage_list+=${data_pve_node_storages[$i,storage]}$'\t'${data_pve_node_storages[$i,type]}$'\t'${data_pve_node_storages[$i,avail]}$'\n'
-        done
-        [[ ${#data_pve_storage_list} -eq 0 ]] && { echo_err "Ошибка: не найдено ни одного подходящего PVE хранилища для контента типа '$content_storage'. Выход"; exit_clear; }
+    if [[ "$1" != check-only ]]; then
 
-        data_pve_storage_list=$( echo -n "$data_pve_storage_list" | sort -t $'\t' -k3nr )
-
-        if [[ "$1" != check-only ]]; then
-            if [[ "${config_base[$content_config]}" == '{manual}' ]]; then
-                $silent_mode && config_base[$content_config]='{auto}' || set_storage
-            fi
-            [[ "${config_base[$content_config]}" == '{auto}' ]] && config_base[$content_config]=$( echo -n "$data_pve_storage_list" | awk -F $'\t' 'NR==1{print $1;exit}' )
+        if [[ "${config_base[storage]}" == '{manual}' ]]; then
+            $silent_mode && config_base[storage]='{auto}' || set_storage
         fi
+        [[ "${config_base[storage]}" == '{auto}' ]] && config_base[storage]=$(echo "$pve_storage_list" | awk 'NR==1{print $1;exit}')
 
-        if ! [[ "${config_base[$content_config]}" =~ ^\{(auto|manual)\}$ ]]; then
-            local index
-            index=$( get_numtable_indexOf data_pve_node_storages "storage=${config_base[$content_config]}" )
-            if [[ $content_storage == images ]]; then
-                sel_storage_type=${data_pve_node_storages[$index,type]}
-                sel_storage_space=${data_pve_node_storages[$index,avail]}
-                
-                [[ "$sel_storage_type" == '' || "$sel_storage_space" == '' ]] && { echo_err "Ошибка: выбранное имя хранилища \"${config_base[$content_config]}\" не существует. Выход"; exit_clear; }
-                case $sel_storage_type in
-                    dir|glusterfs|cifs|nfs|btrfs) config_disk_format=qcow2;;
-                    rbd|iscsidirect|iscsi|zfs|zfspool|lvmthin|lvm) config_disk_format=raw;;
-                    *) echo_err "Ошибка: тип хранилища '$sel_storage_type' неизвестен. Ошибка скрипта или более новая версия PVE? Выход"; exit_clear;;
-                esac
-            else
-                sel_iso_storage_space=${data_pve_node_storages[$index,avail]}
-            fi
-        fi
-    done
+    fi
+
+    if ! [[ "${config_base[storage]}" =~ ^\{(auto|manual)\}$ ]]; then
+        echo "$pve_storage_list" | awk -v s="${config_base[storage]}" 'BEGIN{e=0}$1==s{e=1;exit e}END{exit e}' && echo_err "Ошибка: выбранное имя хранилища \"${config_base[storage]}\" не существует. Выход" && exit 1
+
+        sel_storage_type=$( echo "$pve_storage_list" | awk -v s="${config_base[storage]}" '$1==s{print $3;exit}' )
+        sel_storage_space=$( echo "$pve_storage_list" | awk -v s="${config_base[storage]}" '$1==s{print $2;exit}' )
+
+        case $sel_storage_type in
+            dir|glusterfs|cifs|nfs|btrfs) config_disk_format=qcow2;;
+            rbd|iscsidirect|iscsi|zfs|zfspool|lvmthin|lvm) config_disk_format=raw;;
+            *) echo_err "Ошибка: тип хранилища '$sel_storage_type' неизвестен. Ошибка скрипта или более новая версия PVE? Выход"; exit 1;;
+        esac
+    fi
 }
 
 _configure_roles='проверка валидности списка access ролей (привилегий) Proxmox-а'
@@ -1262,48 +1200,28 @@ function deploy_stand_config() {
     }
 
     function set_disk_conf() {
-        [[ "$1" == '' || "$2" == '' && "$1" != test ]] && { echo_err 'Ошибка: set_disk_conf нет аргумента'; exit_clear; }
-        [[ "$1" == 'test' ]] && { [[ "$disk_type" =~ ^(ide|sata|scsi|virtio)$ ]] && return 0; echo_err "Ошибка: указаный в конфигурации тип диска '$disk_type' не является корректным [ide|sata|scsi|virtio]"; exit_clear; }
-        [[ ! "$1" =~ ^(boot_|)(disk|iso)_?[0-9]+$ ]] && { echo_err "Ошибка: неизвестный параметр ВМ '$1'" && exit_clear; }
+        [[ "$1" == '' || "$2" == '' && "$1" != test ]] && echo_err 'Ошибка: set_disk_conf нет аргумента' && exit 1
+        [[ "$1" == 'test' ]] && { [[ "$disk_type" =~ ^(ide|sata|scsi|virtio)$ ]] && return 0; echo_err "Ошибка: указаный в конфигурации тип диска '$disk_type' не является корректным [ide|sata|scsi|virtio]"; exit 1; }
+        [[ ! "$1" =~ ^(boot_|)disk_?[0-9]+ ]] && { echo_err "Ошибка: неизвестный параметр ВМ '$1'" && exit 1; }
         local _exit=false
         case "$disk_type" in
-            ide)    [[ "$disk_num" -lt 4  ]] || _exit=true;;
-            sata)   [[ "$disk_num" -lt 6  ]] || _exit=true;;
-            scsi)   [[ "$disk_num" -lt 31 ]] || _exit=true;;
-            virtio) [[ "$disk_num" -lt 16 ]] || _exit=true;;
+            ide)    [[ "$disk_num" -le 4  ]] || _exit=true;;
+            sata)   [[ "$disk_num" -le 6  ]] || _exit=true;;
+            scsi)   [[ "$disk_num" -le 31 ]] || _exit=true;;
+            virtio) [[ "$disk_num" -le 16 ]] || _exit=true;;
         esac
-        $_exit && { echo_err "Ошибка: невозможно присоедиить больше $disk_num дисков типа '$disk_type' к ВМ '$elem'. Выход"; exit_clear;}
+        $_exit && { echo_err "Ошибка: невозможно присоедиить больше $((disk_num-1)) дисков типа '$disk_type' к ВМ '$elem'. Выход"; exit 1;}
 
-        if [[ ${BASH_REMATCH[2]} == disk ]]; then
-            if [[ "${BASH_REMATCH[1]}" != boot_ ]] && [[ "$2" =~ ^([0-9]+(|\.[0-9]+))\ *([gGГг][bBБб]?)?$ ]]; then
-                cmd_line+=" --${disk_type}${disk_num} '${config_base[storage]}:${BASH_REMATCH[1]},format=$config_disk_format'";
-            else
-                [[ ${BASH_REMATCH[1]} == boot_ ]] && {
-                    [[ $boot_order ]] && boot_order+=';'
-                    boot_order+="${disk_type}${disk_num}"
-                }
-                local file="$2" disk_opts cmd_disk_opts
-                get_file file || exit_clear
-                if [[ -v vm_config[$1_opt] ]]; then
-                    [[ ${vm_config[$1_opt]} =~ ^\{\ *([^{}]*)\ *\}$ ]] || exit_clear
-                    disk_opts=${BASH_REMATCH[1]}
-                    [[ $disk_opts =~ (^|,\ *)overlay_img\ *=\ *([^, ]+(\ +[^, ]+|))* ]] && {
-                        get_file file '' diff "${BASH_REMATCH[2]}" || exit_clear
-                    }
-                    [[ $disk_opts =~ (^|,\ *)iothread\ *=\ *1($|\ *,) ]] && cmd_disk_opts+=',iothread=1'
-                fi
-                cmd_line+=" --${disk_type}${disk_num} '${config_base[storage]}:0,format=$config_disk_format$cmd_disk_opts,import-from=$file'"
-            fi
+        if [[ "${BASH_REMATCH[1]}" != boot_ ]] && [[ "$2" =~ ^([0-9]+(|\.[0-9]+))\ *([gGГг][bBБб]?)?$ ]]; then
+            cmd_line+=" --${disk_type}${disk_num} '${config_base[storage]}:${BASH_REMATCH[1]},format=$config_disk_format'";
         else
-            [[ ${BASH_REMATCH[1]} == boot_ ]] && {
-                [[ $boot_order ]] && boot_order+=';'
-                boot_order+="${disk_type}${disk_num}"
-            }
             local file="$2"
-            get_file file '' iso || exit_clear
-            cmd_line+=" --${disk_type}${disk_num} '${config_base[storage]}:iso/$file,media=cdrom'"
-
+            get_file file || exit 1
+            cmd_line+=" --${disk_type}${disk_num} '${config_base[storage]}:0,format=$config_disk_format,import-from=$file'"
+            [[ "$boot_order" != '' ]] && boot_order+=';'
+            boot_order+="${disk_type}${disk_num}"
         fi
+
         ((disk_num++))
     }
 
@@ -1398,11 +1316,10 @@ function deploy_stand_config() {
 
         for opt in $(printf '%s\n' "${!vm_config[@]}" | sort); do
             case "$opt" in
-                startup|tags|ostype|serial[0-3]|agent|scsihw|cpu|cores|memory|bwlimit|description|args|arch|vga|kvm|rng0|acpi|tablet|reboot|startdate|tdf|cpulimit|cpuunits|balloon|hotplug)
+                startup|tags|ostype|serial0|serial1|serial2|serial3|agent|scsihw|cpu|cores|memory|bios|bwlimit|description|args|arch|vga|kvm|rng0|acpi|tablet|reboot)
                     cmd_line+=" --$opt '${vm_config[$opt]}'";;
                 network*) set_netif_conf "$opt" "${vm_config[$opt]}";;
-				bios) [[ "${vm_config[$opt]}" == ovmf ]] && cmd_line+=" --bios 'ovmf' --efidisk0 '${config_base[storage]}:0,format=$config_disk_format'" || cmd_line+=" --$opt '${vm_config[$opt]}'";;
-                ?(boot_)@(disk|iso)_+([0-9])) set_disk_conf "$opt" "${vm_config[$opt]}";;
+                boot_disk*|disk*) set_disk_conf "$opt" "${vm_config[$opt]}";;
                 access_roles) ${config_base[access_create]} && set_role_config "${vm_config[$opt]}";;
                 machine) set_machine_type "${vm_config[$opt]}";;
                 *) echo_warn "[Предупреждение]: обнаружен неизвестный параметр конфигурации '$opt = ${vm_config[$opt]}' ВМ '$elem'. Пропущен"
