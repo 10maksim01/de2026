@@ -76,6 +76,8 @@ declare -A config_base=(
 
     [_access_auth_pve_desc]='Изменение отображаемого названия аутентификации PVE'
     [access_auth_pve_desc]='Аутентификация участника'
+
+	
 )
 
 _config_access_roles='Список ролей прав доступа'
@@ -387,6 +389,22 @@ function show_help() {
         -z, --clear-vmconfig$t$_opt_zero_vms
         -sctl, --silent-control$t$_opt_silent_control
 EOL
+}
+
+function exit_pid() {
+    kill $var_script_pid
+}
+
+function test_connection () {
+    [[ ${#1} == 0 ]] && return 1
+    ( IFS=$'\n'; echo "${var_test_connections[*]}" ) | grep -qFx "$1" && return
+    local http_code
+    http_code=$( curl -sIX GET -w '%{stderr}%{http_code}' --connect-timeout 5 "$1" 2>&1 >/dev/null ) || return
+
+    [[ $http_code != 200 ]] && return $http_code
+
+    [[ -v var_test_connections ]] || declare -ag var_test_connections
+    var_test_connections+=( "$1" )
 }
 
 function configure_clear() {
