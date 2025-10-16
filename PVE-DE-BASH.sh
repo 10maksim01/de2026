@@ -358,9 +358,6 @@ function configure_clear() {
         opt_not_tmpfs=true
         configure_imgdir clear force
     }
-    configure_api_ticket clear
-    configure_api_token clear
-    ex_var=1
 }
 
 function exit_clear() { 
