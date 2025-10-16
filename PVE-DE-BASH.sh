@@ -134,7 +134,7 @@ declare -A config_templates=(
 
 _config_stand_1_var='Вариант развертывания для тестирования функционала'
 declare -A config_stand_1_var=(
-    [_stand_config]='
+    [stand_config]='
         pool_name           = Test_A-{0}
         stands_display_desc = Поле описания служебной группы стендов тестирования функционала
         pool_desc           = Описание пула стенда тестирования функционала
