@@ -34,6 +34,7 @@ declare -A config_base=(
     [_pool_name]='Шаблон имени пула стенда'
     [_def_pool_name]='Шаблон имени пула стенда по умолчанию'
     [def_pool_name]='PROF39_stand_{0}'
+
     [_pool_desc]='Шаблон описания пула стенда'
     [pool_desc]='Стенд участника демэкзамена "Сетевое и системное администрирование". Стенд #{0}'
 
@@ -2540,7 +2541,7 @@ function manage_stands() {
             echo_ok "Стенд ${c_value}$pool_name${c_null}: пул удален"
         done
 
-	    for ((i=1; i<=$( echo "${user_list[$group_name]}" | wc -l ); i++)); do
+        for ((i=1; i<=$( echo "${user_list[$group_name]}" | wc -l ); i++)); do
             user_name=$( echo -n "${user_list[$group_name]}" | sed "${i}q;d" )
             
             run_cmd /noexit pve_api_request return_cmd DELETE "/access/users/$user_name" \
