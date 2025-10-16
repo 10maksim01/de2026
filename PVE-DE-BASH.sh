@@ -594,7 +594,7 @@ function show_config() {
     [[ "$1" != opt_verbose ]] && echo
     [[ "$1" == install-change ]] && {
             echo $'Список параметров конфигурации:\n   0. Выйти из режима изменения настроек'
-            for var in inet_bridge storage pool_name pool_desc take_snapshots run_vm_after_installation access_create $( ${config_base[access_create]} && echo access_{user_{name,desc,enable},pass_{length,chars},auth_{pve,pam}_desc} ); do
+            for var in inet_bridge storage iso_storage pool_name pool_desc take_snapshots run_vm_after_installation access_create $( ${config_base[access_create]} && echo access_{user_{name,desc,enable},pass_{length,chars},auth_{pve,pam}_desc} ); do
                 printf '%4s' $((++i)); echo ". ${config_base[_$var]:-$var}: $( get_val_print "${config_base[$var]}" "$var" )"
             done
             printf '%4s' $((++i)); echo ". $_opt_dry_run: $( get_val_print $opt_dry_run )"
@@ -609,36 +609,42 @@ function show_config() {
             return 0
     }
     if [[ "$1" == detailed || "$1" == verbose ]]; then
-        local description=''
-        local value=''
-        echo '#>---------------------- Параметры конфигурации -----------------------<#'
-        [[ "$1" == detailed ]] && echo '#>-------------- Эта конфигурация создана автоматически ---------------<#'
+        local description='' value='' prev_var=''
+        echo '#>---------------------------------- Параметры конфигурации ----------------------------------<#'
+        [[ "$1" == detailed ]] && echo '#>-------------------------- Эта конфигурация создана автоматически --------------------------<#'
 
-        for conf in $(compgen -v | grep -P '^config_(base|access_roles|templates|stand_[1-9][0-9]{0,3}_var)$' | awk '{if(NR>1)printf " ";printf $0}'); do
-            description="$(eval echo "\$_$conf")"
-            [[ "$description" != "" && "$1" == detailed ]] && \
-                if [[ ! "$conf" =~ ^config_stand_[1-9][0-9]{0,3}_var$ ]]; then echo -e "\n# $description"
-                else echo -e "\n_$conf='$description'"; fi
-            for var in $(eval echo "\${!$conf[@]}"); do
-                [[ "$var" =~ ^_ ]] && [[ ! "$var" =~ ^_stand_config$ ]] && continue
-                description="$(eval echo "\${$conf[_$var]}")"
-                [[ "$description" != "" && "$1" == detailed ]] && \
-                    if [[ ! "$conf" =~ ^config_(stand_[1-9][0-9]{0,3}_var|templates)$ ]]; then echo -e "\n# $description"
-                    else echo -e "\n$conf["_$var"]='$description'"; fi
-                value=$(IFS= eval echo "\${$conf[$var]}" | awk 'NF>0{ $1=$1;print "\t"$0}')
-                if [[ $(echo -n "$value" | grep -c '^') == 1 ]]; then
-                    value="$(sed -e 's/^\s*//;s/\s*$//' <<<${value})"
+        for conf in $( printf '%s\n' config_{base,access_roles,templates}; compgen -v | grep -P '^config_stand_[1-9][0-9]?_var$' | sort -V ); do
+            local -n ref_conf="$conf"
+            [[ "$prev_var" != "$conf" ]] && {
+                prev_var="$conf"
+                case "$prev_var" in
+                   config_base) echo $'\n\n''#///**************************** Базовые параметры конфигурации ****************************\\\#';;
+                   config_access_roles) echo $'\n\n''#///::::::::::::::::::::::::::| Конфигурации ролей прав доступа |:::::::::::::::::::::::::::\\\#'$'\n';;
+                   config_templates) echo $'\n\n''#///%%%%%%%%%%%%%%%%%%% Конфигурации шаблонов настроек виртуальных машин %%%%%%%%%%%%%%%%%%%\\\#'$'\n';;
+                   config_stand_*_var) echo $'\n\n''#///=========================== Конфигурация варианта установки ===========================\\\#';;
+                esac
+            }
+            [[ "$conf" =~ ^config_stand_[1-9][0-9]?_var$ ]] && echo
+            for var in $( printf '%s\n' "${!ref_conf[@]}" | sort -V ); do
+                [[ "$var" =~ ^_ ]] && continue
+                description="$( echo -n "${ref_conf[_$var]}" )"
+                [[ "$description" != "" && "$1" == detailed ]] && [[ ! "$conf" =~ ^config_(stand_[1-9][0-9]{0,3}_var|templates)$ ]] \
+                    && echo -e "\n${c_lcyan}# $description${c_null}"
+
+                value=$( echo -n "${ref_conf[$var]}" )
+                if [[ "$( echo "$value" | wc -l )" -le 1 ]]; then
                     echo -e "$conf["$var"]='\e[1;34m${value}\e[m'"
                 else
+                    value="$( echo -n "$value" | sed 's/ = /\r/' | column -t -s $'\r' -o ' = ' | awk '{print "\t" $0}' )"
                     echo -e "$conf["$var"]='\n\e[1;34m${value}\e[m\n'"
                 fi
             done
         done
-        echo '#<------------------- Конец параметров конфигурации ------------------->#'
+        echo $'\n#<------------------------------ Конец параметров конфигурации ------------------------------->#'
     else
         if [[ "$1" != var ]]; then
             echo $'#>------------------ Основные параметры конфигурации -------------------<#\n'
-            for var in inet_bridge storage $( [[ $opt_sel_var != 0 && "${config_base[pool_name]}" != '' ]] && echo pool_name ) take_snapshots access_create; do
+            for var in inet_bridge storage iso_storage $( [[ $opt_sel_var != 0 && "${config_base[pool_name]}" != '' ]] && echo pool_name ) take_snapshots access_create; do
                 echo "  $((++i)). ${config_base[_$var]:-$var}: $(get_val_print "${config_base[$var]}" "$var" )"
             done
 
@@ -649,33 +655,48 @@ function show_config() {
             fi
         fi
         i=1
-        local first_elem=true
-        local no_elem=true
-        local pool_name=''
+        local first_elem=true no_elem=true pool_name='' vm_name='' vm_template='' num_color
+
         if [[ $opt_sel_var != 0 ]]; then
-            i=$opt_sel_var
+            i=$( compgen -v | grep -Po '^config_stand_\K[1-9][0-9]{0,3}(?=_var$)' | sort -n  | awk "\$0==$opt_sel_var{print NR;exit}" )
             echo $'\nВыбранный вариант установки стендов:'
             local vars="config_stand_${opt_sel_var}_var"
         else
             echo $'\nВарианты установки стендов:'
-            local vars=$(compgen -v | grep -P '^config_stand_[1-9][0-9]{0,3}_var$' | awk '{if (NR>1) printf " ";printf $0}')
+            local vars=$( compgen -v | grep -P '^config_stand_[1-9][0-9]{0,3}_var$' | sort -V | awk '{if (NR>1) printf " ";printf $0}' )
         fi
         for conf in $vars; do
-            pool_name=''; description=''
-            description="$(eval echo "\$_$conf")"
-            [[ "$description" == "" ]] && description="Вариант $i (без названия)"
-            get_dict_value "$conf[_stand_config]" pool_name=pool_name
+            local -n ref_conf="$conf"
+            description="$( get_dict_value "$conf[stand_config]" description )"
+            [[ "$description" == '' ]] && description="Вариант $i (без названия)"
+            pool_name="$( get_dict_value "$conf[stand_config]" pool_name )"
             [[ "$pool_name" == "" ]] && pool_name=${config_base[def_pool_name]}
-            description="$pool_name : $description"
-            for var in $(eval echo "\${!$conf[@]}"); do
-                [[ "$var" =~ ^_ ]] && continue
-                $first_elem && first_elem=false && echo -n $'\n  '"$((i++)). $description"$'\n  - ВМ: '
+            description="$pool_name${c_null} : ${c_val}${description//'\n'/$'\n    '$c_lyellow}${c_null}"
+            first_elem=true
+            num_color='    '
+            grep -Fwq "$conf" <<<"${var_warning_configs[@]}" && num_color="${c_err}[!]${c_null} ${c_warn}"
+            echo -n $'\n'"$num_color$((i++)). $description"$'\n    - ВМ: '
+            for var in $( printf '%s\n' "${!ref_conf[@]}" | sort -V ); do
+                [[ "$var" == 'stand_config' ]] && continue
+                $first_elem && first_elem=false
                 no_elem=false
-                description="$(eval echo "\${$conf[_$var]}")"
-                echo -en "$var"
-                [[ "$description" != "" ]] && echo -en "(\e[1;34m${description}\e[m) " || echo -n ' '
+
+                vm_name="$( get_dict_value "$conf[$var]" name )"
+                description="$( get_dict_value "$conf[$var]" os_descr )"
+
+                [[ "$vm_name" == '' || "$description" == '' ]] && {
+                    vm_template="$( get_dict_value "$conf[$var]" config_template )"
+                    [[ ! -v "config_templates[$vm_template]" ]] && { echo_err "Ошибка: шаблон конфигурации '$vm_template' для ВМ '$var'${vm_name:+($vm_name)} не найден. Выход"; exit_pid; } 
+                    [[ "$vm_name" == '' ]] && vm_name="$( get_dict_value "config_templates[$vm_template]" name )"
+                    [[ "$description" == '' ]] && description="$( get_dict_value "config_templates[$vm_template]" os_descr )"
+                }
+
+                [[ "$vm_name" == '' ]] && vm_name="$var"
+                
+                echo -en "${c_val}$vm_name${c_null}"
+                [[ "$description" != "" ]] && echo -en "(${description}) " || echo -n ' '
             done
-            ! $first_elem && echo
+            ! $first_elem && echo || echo '--- пустая конфигурация ---'
             first_elem=true
         done
         $no_elem && echo '--- пусто ---'
@@ -684,8 +705,8 @@ function show_config() {
             echo -n $'\n'"Номера стендов: ${c_value}"
             printf '%s\n' "${opt_stand_nums[@]}" | awk 'NR==1{d="";first=last=$1;next} $1 == last+1 {last=$1;next} {d="-";if (first==last-1)d=",";if (first!=last) printf first d; printf last","; first=last=$1} END{d="-";if (first==last-1)d=",";if (first!=last)printf first d; printf last"\n"}'
             echo -n "${c_null}"
-            echo "Всего стендов к развертыванию: $(get_val_print "${#opt_stand_nums[@]}" )"
-            echo "Кол-во создаваемых виртуальных машин: $(get_val_print "$(( ${#opt_stand_nums[@]} * $(eval "printf '%s\n' \${!config_stand_${opt_sel_var}_var[@]}" | grep -Pv '^_' | wc -l) ))" )"
+            echo "Всего стендов к развертыванию: $( get_val_print "${#opt_stand_nums[@]}" )"
+            echo "Кол-во создаваемых виртуальных машин: $( get_val_print "$(( ${#opt_stand_nums[@]} * $(eval "printf '%s\n' \${!config_stand_${opt_sel_var}_var[@]}" | grep -Pc '^vm_\d+$' ) ))" )"
         fi
     fi
     [[ "$1" != opt_verbose ]] && echo
