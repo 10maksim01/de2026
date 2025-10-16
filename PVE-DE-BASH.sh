@@ -1552,96 +1552,131 @@ function deploy_stand_config() {
     }
 
     function set_machine_type() {
-        [[ "$1" == '' ]] && echo_err 'Ошибка: set_disk_conf нет аргумента' && exit 1
-        local machine_list=$( kvm -machine help | awk 'NR>1{print $1}' )
-        local type=$1
-        if ! echo "$machine_list" | grep -Fxq "$type"; then
+        [[ "$1" == '' ]] && { echo_err "Ошибка: $FUNCNAME нет аргумента"; exit_clear; }
+        [[ ! $data_kvm_machine_list ]] && {
+            if ! pve_api_request data_kvm_machine_list GET /nodes/$var_pve_node/capabilities/qemu/machines; then
+                wcho_warn "Предупреждение: не удалось получить список совместимых machines через API"
+                data_kvm_machine_list=$( set -o pipefail; kvm -machine help | awk 'NR>1&&/q35|i440fx/{print $1}' | sort -Vr ) \
+                    || { echo_err "Ошибка: $FUNCNAME: не удалось получить список поддерживаемых machine"; exit_clear; }
+            else
+                data_kvm_machine_list=$( grep -Po '({|,)\s*"id"\s*:\s*"\K[^"]+|({|,)\s*"type"\s*:\s*"\K[^"]+' <<<$data_kvm_machine_list | sed 's/^i440fx$/pc/' | sort -uVr )
+            fi
+        }
+        local type=${1//./\\.}
+        type=$( grep -Px -m 1 "${type//+/\\+}" <<<$data_kvm_machine_list ) || {
+            type=$1
             if [[ "$type" =~ ^((pc)-i440fx|pc-(q35))-[0-9]+.[0-9]+$ ]]; then
                 type=${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}
-                echo_warn "[Предупреждение]: в конфигурации ВМ '$elem' указанный тип машины '$1' не существует в этой версии PVE/QEMU. Заменен на последнюю доступную версию pc-${type/pc/i440fx}"
+                echo_warn "[Предупреждение]: в конфигурации ВМ '$elem' указанный тип машины '$1' не существует в этой версии PVE/QEMU. Заменен на последнюю доступную версию типа ${type/pc/i440fx}"
             else
                 echo_err "Ошибка: в конфигурации ВМ '$elem' указан неизвестный тип машины '$1'. Ошибка или старая версия PVE?. Выход"
-                exit 1
+                exit_clear
             fi
-        fi
+        }
         cmd_line+=" --machine '$type'"
     }
 
-    [[ "$1" == '' ]] && echo_err "Внутренняя ошибка скрипта установки стенда" && exit 1
+    function set_firewall_opt() {
+        [[ "$1" == '' ]] && return 1
+        local opt=''
+        echo -n "$1" | grep -Pq '^{[^{}]*}$' || { echo_err "Ошибка set_firewall_opt: ВМ '$elem' некорректный синтаксис"; exit_clear; }
+        echo -n "$1" | grep -Pq '(^{|,) ?enable ?= ?1 ?(,? ?}$|,)' && opt+=" enable=1"
+        echo -n "$1" | grep -Pq '(^{|,) ?dhcp ?= ?1 ?(,? ?}$|,)' && opt+=" dhcp=1"
+        [[ "$opt" != '' ]] && run_cmd pve_api_request return_cmd PUT "/nodes/$var_pve_node/qemu/$vmid/firewall/options" "${opt}"
+    }
+
+    [[ "$1" == '' ]] && { echo_err "Внутренняя ошибка скрипта установки стенда"; exit_clear; }
 
     local -n "config_var=config_stand_${opt_sel_var}_var"
     local -A Networking=()
 
     local stand_num=$1
     local vmid=$((${config_base[start_vmid]} + $2 * 100 + 1))
-    [[ "$stands_group" == '' ]] && { echo_err "Ошибка: не указана группа стендов"; exit 1; }
+    [[ "$stands_group" == '' ]] && { echo_err "Ошибка: не указана группа стендов"; exit_clear; }
     local pool_name="${config_base[pool_name]/\{0\}/$stand_num}"
 
     local pve_net_ifs=''
-    parse_noborder_table 'pvesh get /nodes/$( hostname -s )/network' pve_net_ifs iface
+    pve_api_request pve_net_ifs GET /nodes/$var_pve_node/network || { echo_err "Ошибка: не удалось загрузить список сетевых интерфейсов"; exit_clear; }
+    pve_net_ifs=$( echo -n "$pve_net_ifs" | grep -Po '({|,)"iface":"\K[^"]+' )
 
-    run_cmd /noexit "pveum pool add '$pool_name' --comment '${config_base[pool_desc]/\{0\}/$stand_num}'" || { echo_err "Ошибка: не удалось создать пул '$pool_name'"; exit 1; }
-    run_cmd "pveum acl modify '/pool/$pool_name' --propagate 'false' --groups '$stands_group' --roles 'NoAccess'"
-
+    run_cmd /noexit pve_api_request return_cmd POST /pools "'poolid=$pool_name' 'comment=${config_base[pool_desc]/\{0\}/$stand_num}'" || { echo_err "Ошибка: не удалось создать пул '$pool_name'"; exit_clear; }
+    run_cmd pve_api_request return_cmd PUT /access/acl "'path=/pool/$pool_name' 'groups=$stands_group' roles=NoAccess  propagate=0"
+    echo_ok "Создан пул стенда ${c_val}$pool_name"
 
     ${config_base[access_create]} && {
         local username="${config_base[access_user_name]/\{0\}/$stand_num}@pve"
-        run_cmd /noexit "pveum user add '$username' --enable '${config_base[access_user_enable]}' --comment '${config_base[access_user_desc]/\{0\}/$stand_num}' --groups '$stands_group'" \
-            || { echo_err "Ошибка: не удалось создать пользователя '$username'"; exit 1; }
-        # run_cmd "pveum user modify '$username' --comment '${config_base[access_user_desc]/\{0\}/$stand_num}'"
-        run_cmd "pveum acl modify '/pool/$pool_name' --users '$username' --roles 'PVEAuditor' --propagate 'false'"
+        
+        run_cmd /noexit pve_api_request return_cmd POST /access/users "'userid=$username' 'groups=$stands_group' 'enable=$( get_int_bool "${config_base[access_user_enable]}" )' 'comment=${config_base[access_user_desc]/\{0\}/$stand_num}'" \
+            || { echo_err "Ошибка: не удалось создать пользователя '$username'"; exit_clear; }
+        
+        if [[ "${config_base[pool_access_role]}" != '' && "${config_base[pool_access_role]}" != NoAccess ]]; then
+            set_role_config "${config_base[pool_access_role]}"
+            run_cmd pve_api_request return_cmd PUT /access/acl "'path=/pool/$pool_name' 'users=$username' 'roles=${config_base[pool_access_role]}'"
+        else run_cmd pve_api_request return_cmd PUT /access/acl "'path=/pool/$pool_name' 'users=$username' roles=PVEAuditor propagate=0"; fi
+        echo_ok "Создан пользователь стенда ${c_val}$username"
     }
-	
-   for elem in $(printf '%s\n' "${!config_var[@]}" | grep -P '^[^_]' | sort); do
 
-        local cmd_line=''
-        local netifs_type='virtio'
-        local disk_type='scsi'
-        local disk_num=0
-        local boot_order=''
-        local -A vm_config=()
-        local cmd_line="qm create '$vmid' --name '$elem' --pool '$pool_name'"
+    local cmd_line netifs_type='virtio' netifs_mac disk_type='scsi' disk_num=0 boot_order vm_template vm_name
+    local -A vm_config=()
 
-        get_dict_config "config_stand_${opt_sel_var}_var[$elem]" vm_config
+    for elem in $(printf '%s\n' "${!config_var[@]}" | grep -P 'vm_\d+' | sort -V ); do
 
-        [[ "${vm_config[config_template]}" != '' ]] && {
-            [[ -v "config_templates[${vm_config[config_template]}]" ]] || { echo_err "Ошибка: шаблон конфигурации '${vm_config[config_template]}' для ВМ '$elem' не найден. Выход"; exit 1; }
-            get_dict_config "config_templates[${vm_config[config_template]}]" vm_config
-            get_dict_config "config_stand_${opt_sel_var}_var[$elem]" vm_config
-            unset -v 'vm_config[config_template]';
+        netifs_type='virtio'
+        netifs_mac=''
+        disk_type='scsi'
+        disk_num=0
+        boot_order=''
+        vm_config=()
+        vm_template="$( get_dict_value config_stand_${opt_sel_var}_var[$elem] config_template )"
+
+        [[ "$vm_template" != '' ]] && {
+            [[ -v "config_templates[$vm_template]" ]] || { echo_err "Ошибка: шаблон конфигурации '$vm_template' для ВМ '$elem' не найден. Выход"; exit_clear; }
+            get_dict_config "config_templates[$vm_template]" vm_config
         }
+        get_dict_config "config_stand_${opt_sel_var}_var[$elem]" vm_config
+        vm_name="${vm_config[name]}"
+        unset 'vm_config[name]' 'vm_config[os_descr]' 'vm_config[templ_descr]' 'vm_config[config_template]'
+
+        [[ "$vm_name" == '' ]] && vm_name="$elem"
+
+        cmd_line="qm create '$vmid' --name '$vm_name' --pool '$pool_name'"
+
         [[ "${vm_config[netifs_type]}" != '' ]] && netifs_type="${vm_config[netifs_type]}" && unset -v 'vm_config[netifs_type]'
         [[ "${vm_config[disk_type]}" != '' ]] && disk_type="${vm_config[disk_type]}" && unset -v 'vm_config[disk_type]'
+        [[ "${vm_config[netifs_mac]}" != '' ]] && netifs_mac="${vm_config[netifs_mac]}" && unset -v 'vm_config[netifs_mac]'
 
-        set_netif_conf test && set_disk_conf test || exit 1
+        set_netif_conf test && set_disk_conf test || exit_clear
 
-          for opt in $(printf '%s\n' "${!vm_config[@]}" | sort); do
+        for opt in $( printf '%s\n' "${!vm_config[@]}" | sort -V ); do
             case "$opt" in
                 startup|tags|ostype|serial[0-3]|agent|scsihw|cpu|cores|memory|bwlimit|description|args|arch|vga|kvm|rng0|acpi|tablet|reboot|startdate|tdf|cpulimit|cpuunits|balloon|hotplug)
                     cmd_line+=" --$opt '${vm_config[$opt]}'";;
                 network*) set_netif_conf "$opt" "${vm_config[$opt]}";;
                 bios) [[ "${vm_config[$opt]}" == ovmf ]] && cmd_line+=" --bios 'ovmf' --efidisk0 '${config_base[storage]}:0,format=$config_disk_format'" || cmd_line+=" --$opt '${vm_config[$opt]}'";;
                 ?(boot_)@(disk|iso)_+([0-9])) set_disk_conf "$opt" "${vm_config[$opt]}";;
-                access_roles) ${config_base[access_create]} && set_role_config "${vm_config[$opt]}";;
+                access_role) ${config_base[access_create]} && set_role_config "${vm_config[$opt]}";;
                 machine) set_machine_type "${vm_config[$opt]}";;
-                *) echo_warn "[Предупреждение]: обнаружен неизвестный параметр конфигурации '$opt = ${vm_config[$opt]}' ВМ '$elem'. Пропущен"
+                firewall_opt|?(boot_)@(disk|iso)_+([0-9])_opt|templ_*) continue;;
+                *) echo_warn "[Предупреждение]: обнаружен неизвестный параметр конфигурации '$opt = ${vm_config[$opt]}' ВМ '$vm_name'. Пропущен"
             esac
         done
         [[ "$boot_order" != '' ]] && cmd_line+=" --boot 'order=$boot_order'"
 
-        run_cmd /noexit "$cmd_line " || { echo_err "Ошибка: не удалось создать ВМ '$elem' стенда '$pool_name'. Выход"; exit 1; }
+        run_cmd /noexit "$cmd_line" || { echo_err "Ошибка: не удалось создать ВМ '$vm_name' стенда '$pool_name'. Выход"; exit_clear; }
 
-        ${config_base[access_create]} && [[ "${vm_config[access_roles]}" != '' ]] && run_cmd "pveum acl modify '/vms/$vmid' --roles '${vm_config[access_roles]}' --users '$username'"
+        set_firewall_opt "${vm_config[firewall_opt]}"
 
-        ${config_base[take_snapshots]} && run_cmd /pipefail "qm snapshot '$vmid' 'Start' --description 'Исходное состояние ВМ' | tail -n2"
+        ${config_base[access_create]} && [[ "${vm_config[access_role]}" != '' ]] && run_cmd pve_api_request return_cmd PUT /access/acl "'path=/vms/$vmid' 'roles=${vm_config[access_role]}' 'users=$username'"
 
-        ${config_base[run_vm_after_installation]} && manage_bulk_vm_power --add "$( hostname -s )" "$vmid"
+        ${config_base[take_snapshots]} && run_cmd "pvesh create '/nodes/$var_pve_node/qemu/$vmid/snapshot' --snapname 'Start' --description 'Исходное состояние ВМ'"
 
-        echo_ok "${c_lcyan}Конфигурирование VM $elem завершено${c_null}"
+        ${config_base[run_vm_after_installation]} && manage_bulk_vm_power --add "$var_pve_node" "$vmid"
+
+        echo_ok "Конфигурирование ВМ ${c_ok}$vm_name${c_null} (${c_info}$vmid${c_null}) завершено"
         ((vmid++))
     done
 
-    echo_ok "${c_lcyan}Конфигурирование стенда $stand_num завершено${c_null}"
+    echo_ok "Конфигурирование стенда ${c_value}$pool_name${c_null} завершено"
 }
 
 function deploy_access_passwd() {
