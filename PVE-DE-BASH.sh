@@ -348,6 +348,12 @@ function parse_noborder_table() {
 }
 
 # Объявление основных функций
+function exit_clear() { 
+    ((ex_var++))
+    [[ "$ex_var" == 1 ]] && configure_clear
+    echo $'\e[m' > /dev/tty
+    exit ${1-1}
+}
 
 function show_help() {
     local t=$'\t'
