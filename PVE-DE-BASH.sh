@@ -907,39 +907,61 @@ function descr_string_check() {
 
 
 function configure_storage() {
-    [[ "$1" == check-only ]] && [[ "${config_base[storage]}" == '{auto}' || "${config_base[storage]}" == '{manual}' ]] && return 0
+    [[ "$1" == check-only ]] && [[ "${config_base[storage]}" == '{auto}' || "${config_base[storage]}" == '{manual}' ]]  \
+        && [[ "${config_base[iso_storage]}" == '{auto}' || "${config_base[iso_storage]}" == '{manual}' ]] && return 0
     set_storage() {
             echo $'\nСписок доступных хранилищ:'
-            echo "$pve_storage_list" | awk -F' ' 'BEGIN{split("К|М|Г|Т",x,"|")}{for(i=1;$2>=1024&&i<length(x);i++)$2/=1024;printf("%s\t%s\t%s\t%3.1f %sБ\n",NR,$1,$3,$2,x[i]) }' \
+            echo "$data_pve_storage_list" | awk -F $'\t' 'BEGIN{split("|К|М|Г|Т",x,"|")}{for(i=1;$3>=1024&&i<length(x);i++)$3/=1024;printf("%s\t%s\t%s\t%3.1f %sБ\n",NR,$1,$2,$3,x[i]) }' \
             | column -t -s$'\t' -N'Номер,Имя хранилища,Тип хранилища,Свободное место' -o$'\t' -R1
-            config_base[storage]=$( read_question_select 'Выберите номер хранилища'  '^[1-9][0-9]*$' 1 $(echo -n "$pve_storage_list" | grep -c '^') )
-            config_base[storage]=$(echo "$pve_storage_list" | awk -F' ' -v nr="${config_base[storage]}" 'NR==nr{print $1}')
+            config_base[$content_config]=$( read_question_select 'Выберите номер хранилища'  '^[1-9][0-9]*$' 1 $( echo "$data_pve_storage_list" | wc -l ) )
+            config_base[$content_config]=$( echo "$data_pve_storage_list" | awk -F $'\t' -v nr="${config_base[$content_config]}" 'NR==nr{print $1}' )
     }
-    pve_storage_list=$( pvesm status --target "$( hostname -s )" --enabled 1 --content images | awk -F' ' 'NR>1{print $1" "$6" "$2}' | sort -k2nr )
+	
+	declare -Ag data_pve_node_storages=()
+    local data_pve_storage_list='' content_types='images iso' content_config max_index i
+    jq_data_to_array "/nodes/$var_pve_node/storage?enabled=1&content=${content_types// /'%20'}" data_pve_node_storages
+    [[ $1 == iso || $1 == images ]] && content_types=$1
+    
+    for content_storage in $content_types; do
+        if [[ $content_storage == images ]]; then content_config='storage'; else content_config='iso_storage'; fi
 
-    [[ "$pve_storage_list" == '' ]] && echo_err 'Ошибка: не найдено ни одного активного PVE хранилища для дисков ВМ. Выход' && exit 1
+        [[ "${data_pve_node_storages[0,storage]}" == '' || "${data_pve_node_storages[0,avail]}" == '' ]] && { echo_err 'Ошибка: не найдено ни одного подходящего PVE хранилища. Выход'; exit_clear; }
 
-    if [[ "$1" != check-only ]]; then
+        max_index=${data_pve_node_storages[count]}
+        data_pve_storage_list=''
+        for ((i=0;i<$max_index;i++)); do
+            [[ ${data_pve_node_storages[$i,active]} != 1 || ! ${data_pve_node_storages[$i,content]} =~ (^|,)"$content_storage"(,|$) ]] && continue
+            data_pve_storage_list+=${data_pve_node_storages[$i,storage]}$'\t'${data_pve_node_storages[$i,type]}$'\t'${data_pve_node_storages[$i,avail]}$'\n'
+        done
+        [[ ${#data_pve_storage_list} -eq 0 ]] && { echo_err "Ошибка: не найдено ни одного подходящего PVE хранилища для контента типа '$content_storage'. Выход"; exit_clear; }
 
-        if [[ "${config_base[storage]}" == '{manual}' ]]; then
-            $silent_mode && config_base[storage]='{auto}' || set_storage
+        data_pve_storage_list=$( echo -n "$data_pve_storage_list" | sort -t $'\t' -k3nr )
+
+        if [[ "$1" != check-only ]]; then
+            if [[ "${config_base[$content_config]}" == '{manual}' ]]; then
+                $silent_mode && config_base[$content_config]='{auto}' || set_storage
+            fi
+            [[ "${config_base[$content_config]}" == '{auto}' ]] && config_base[$content_config]=$( echo -n "$data_pve_storage_list" | awk -F $'\t' 'NR==1{print $1;exit}' )
         fi
-        [[ "${config_base[storage]}" == '{auto}' ]] && config_base[storage]=$(echo "$pve_storage_list" | awk 'NR==1{print $1;exit}')
 
-    fi
-
-    if ! [[ "${config_base[storage]}" =~ ^\{(auto|manual)\}$ ]]; then
-        echo "$pve_storage_list" | awk -v s="${config_base[storage]}" 'BEGIN{e=0}$1==s{e=1;exit e}END{exit e}' && echo_err "Ошибка: выбранное имя хранилища \"${config_base[storage]}\" не существует. Выход" && exit 1
-
-        sel_storage_type=$( echo "$pve_storage_list" | awk -v s="${config_base[storage]}" '$1==s{print $3;exit}' )
-        sel_storage_space=$( echo "$pve_storage_list" | awk -v s="${config_base[storage]}" '$1==s{print $2;exit}' )
-
-        case $sel_storage_type in
-            dir|glusterfs|cifs|nfs|btrfs) config_disk_format=qcow2;;
-            rbd|iscsidirect|iscsi|zfs|zfspool|lvmthin|lvm) config_disk_format=raw;;
-            *) echo_err "Ошибка: тип хранилища '$sel_storage_type' неизвестен. Ошибка скрипта или более новая версия PVE? Выход"; exit 1;;
-        esac
-    fi
+        if ! [[ "${config_base[$content_config]}" =~ ^\{(auto|manual)\}$ ]]; then
+            local index
+            index=$( get_numtable_indexOf data_pve_node_storages "storage=${config_base[$content_config]}" )
+            if [[ $content_storage == images ]]; then
+                sel_storage_type=${data_pve_node_storages[$index,type]}
+                sel_storage_space=${data_pve_node_storages[$index,avail]}
+                
+                [[ "$sel_storage_type" == '' || "$sel_storage_space" == '' ]] && { echo_err "Ошибка: выбранное имя хранилища \"${config_base[$content_config]}\" не существует. Выход"; exit_clear; }
+                case $sel_storage_type in
+                    dir|glusterfs|cifs|nfs|btrfs) config_disk_format=qcow2;;
+                    rbd|iscsidirect|iscsi|zfs|zfspool|lvmthin|lvm) config_disk_format=raw;;
+                    *) echo_err "Ошибка: тип хранилища '$sel_storage_type' неизвестен. Ошибка скрипта или более новая версия PVE? Выход"; exit_clear;;
+                esac
+            else
+                sel_iso_storage_space=${data_pve_node_storages[$index,avail]}
+            fi
+        fi
+    done
 }
 
 _configure_roles='проверка валидности списка access ролей (привилегий) Proxmox-а'
@@ -1239,7 +1261,7 @@ function deploy_stand_config() {
             }
             local file="$2"
             get_file file '' iso || exit_clear
-            cmd_line+=" --${disk_type}${disk_num} '$file,media=cdrom'"
+            cmd_line+=" --${disk_type}${disk_num} '${config_base[iso_storage]}:iso/$file,media=cdrom'"
 
         fi
         ((disk_num++))
