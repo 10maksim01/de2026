@@ -386,6 +386,13 @@ function show_help() {
 EOL
 }
 
+function exit_clear() { 
+    ((ex_var++))
+    [[ "$ex_var" == 1 ]] && configure_clear
+    echo $'\e[m' > /dev/tty
+    exit ${1-1}
+}
+
 function pve_api_request() {
     [[ "$2" == '' || "$3" == '' ]] && { echo_err 'Ошибка: нет подходящих аргументов или токена для pve_api_request'; configure_api_token clear force; exit_clear; }
     [[ "$var_pve_api_curl" == '' ]] && {
