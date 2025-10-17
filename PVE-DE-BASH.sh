@@ -409,6 +409,182 @@ function show_help() {
 EOL
 }
 
+function pve_api_request() {
+    [[ "$2" == '' || "$3" == '' ]] && { echo_err 'Ошибка: нет подходящих аргументов или токена для pve_api_request'; configure_api_token clear force; exit_clear; }
+    [[ "$var_pve_api_curl" == '' ]] && {
+        configure_api_token init;
+        [[ "$var_pve_api_curl" == '' ]] && { echo_err 'Ошибка: не удалось получить API токен для pve_api_request'; configure_api_token clear force; exit_clear; }
+    }
+    local http_code i
+    for i in "${@:4}"; do http_code+=( --data-urlencode "$i" ); done
+    [[ "$1" != '' ]] && local -n ref_result=$1 || local ref_result
+
+    ref_result=$( "${var_pve_api_curl[@]}" "${config_base[pve_api_url]}${3}" -X "${2}" "${http_code[@]}" )
+
+    case $? in
+        0|22) [[ "$ref_result" =~ (.*)$'\n'([0-9]{3})$ ]] || { echo_err "Ошибка pve_api_request: не удалось узнать HTTP_CODE"; configure_api_token clear force; exit_clear; }
+              ref_result=${BASH_REMATCH[1]}
+              http_code=${BASH_REMATCH[2]}
+              [[ $http_code -lt 300 ]] && return 0
+              [[ $http_code == 401 ]] && {
+                    [[ "$pve_api_request_exit" == 1 ]] && return 1
+					configure_api_token clear force
+					configure_api_token init
+                    local pve_api_request_exit=1
+					pve_api_request "$@"
+                    return $?
+              }
+              ! [[ $http_code =~ ^(400|500|501|596)$ ]] && {
+                    echo_err "Ошибка: запрос к API был обработан с ошибкой: ${c_val}${*:2}"
+                    echo_err "API токен: ${c_val}${var_pve_token_id}"
+                    echo_err "HTTP код ответа: ${c_val}$http_code"
+                    echo_err "Ответ сервера: ${c_val}$( echo -n "$res" | awk 'NF>0{if (n!=1) {printf $0;n=1;next}; printf "\n"$0 }' )"
+                    exit_clear
+              }
+              return $http_code;;
+        7|28) echo_err "Ошибка: не удалось подключиться к PVE API. PVE запущен/работает?";;
+        2)    echo_err "Ошибка: неизвестная опция curl. Старая версия?";;
+        *)    echo_err "Ошибка: не удалось выполнить запрос к API: ${c_val}${*:2}${c_err}. Токен ${c_val}${var_pve_token_id}${c_err}. Код ошибки curl: ${c_val}$?";;
+    esac
+    configure_api_token clear force
+    exit_clear
+}
+
+function configure_api_token() {
+    local pve_api_request_exit=1
+    [[ "$1" == 'clear' ]] && {
+
+        [[ "$var_pve_token_id" == '' ]] && return 0
+        
+		if [[ "$2" == 'force' || "$var_pve_api_curl" == '' ]]; then
+			pvesh delete "/access/users/root@pam/token/$var_pve_token_id" 2>/dev/null
+		else
+			{ pve_api_request '' DELETE "/access/users/root@pam/token/$var_pve_token_id"; [[ $? =~ ^0$|^244$ ]]; } \
+				|| { pvesh delete "/access/users/root@pam/token/$var_pve_token_id" 2>/dev/null; [[ $? =~ ^0$|^255$ ]]; }  \
+				|| echo_err "Ошибка: Не удалось удалить удалить токен API: ${c_val}${var_pve_token_id}${c_err}"
+		fi
+        unset var_pve_token_id var_pve_api_curl
+        return 0
+    } || [[ "$1" != 'init' ]] && { echo_err 'Ошибка: нет подходящих аргументов configure_api_token'; configure_api_token clear force; exit_clear; }
+
+    [[ "$var_pve_token_id" == '' || "$var_pve_api_curl" == '' ]] && {
+        echo_tty "${c_ok}Получение PVE API токена..."
+
+        var_pve_token_id="PVE-ASDaC-BASH_$( cat /proc/sys/kernel/random/uuid )" || { echo_err 'Ошибка: не удалось сгенерировать уникальный идентификатор для API токена'; configure_api_token clear force; exit_clear; }
+        local data
+
+        data=$( pvesh create /access/users/root@pam/token/$var_pve_token_id --privsep '0' --comment "Токен для PVE-ASDaC-BASH. Создан: $( date '+%H:%M:%S %d.%m.%Y' )" --expire "$(( $( date +%s ) + 86400 ))" --output-format json ) \
+            || { echo_err "Ошибка: не удалось создать новый API токен ${c_val}${var_pve_token_id}"; configure_api_token clear force; exit_clear; }
+
+        [[ "$data" =~ '"value":"'([^\"]+) ]] && var_pve_api_curl=${BASH_REMATCH[1]}
+        [[ "$data" =~ '"full-tokenid":"'([^\"]+) ]] && data=${BASH_REMATCH[1]}
+
+        [[ ${#data} -lt 30 || ${#var_pve_api_curl} -lt 30 ]] && { echo_err "Ошибка: непредвиденные значения API token (${c_val}${var_pve_api_curl}${c_err}) и/или token ID (${c_val}${data}${c_err})"; configure_api_token clear force; exit_clear; }
+
+        var_pve_api_curl=( curl -ksG  -x '' -w '\n%{http_code}' --connect-timeout 5 -H "Authorization: PVEAPIToken=$data=$var_pve_api_curl" )
+    }
+    pve_api_request data_pve_version GET /version
+    [[ "$data_pve_version" =~ '"release":"'([^\"]+) ]] && data_pve_version=${BASH_REMATCH[1]} || { echo_err 'Не удалось получить версию PVE через API'; configure_api_token clear force; exit_clear; }
+}
+
+function configure_api_ticket() {
+
+	[[ "$1" == 'clear' ]] && {
+        [[ "$var_pve_ticket_user" == '' ]] && return 0
+		if [[ "$2" == 'force' ]]; then
+			pvesh delete "/access/users/$var_pve_ticket_user" 2>/dev/null
+		else 
+            local pve_api_request_exit=1
+			{ pve_api_request '' DELETE "/access/users/$var_pve_ticket_user"; [[ $? =~ ^0$|^244$ ]]; } \
+				|| { configure_api_token clear force; pvesh delete "/access/users/$var_pve_ticket_user" 2>/dev/null; [[ $? =~ ^0$|^255$ ]]; } \
+				|| echo_err "Ошибка: Не удалось удалить удалить пользователя ${c_val}${var_pve_ticket_user}${c_err}"
+		fi
+        unset var_pve_ticket_user var_pve_ticket_pass var_pve_tapi_curl
+        return 0
+    } || [[ "$1" != 'init' ]] && { echo_err 'Ошибка: нет подходящих аргументов configure_api_ticket'; exit_clear; }
+    
+    { [[ "$var_pve_ticket_user" == '' || "$var_pve_ticket_pass"  == '' ]] || ! pve_api_request '' GET "/access/users/$var_pve_ticket_user" 2>/dev/null; } && {
+        var_pve_ticket_user="PVE-ASDaC-BASH_$( cat /proc/sys/kernel/random/uuid )@pve"
+		var_pve_ticket_pass=$( tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 64 )
+		[[ "${#var_pve_ticket_pass}" -lt 32 ]] && { echo_err "Ошибка: не удалось сгенерировать пароль для служебного пользователя"; exit_clear; }
+		
+		pve_api_request '' POST /access/users "userid=$var_pve_ticket_user" "comment=Служебный: PVE-ASDaC-BASH. Создан: $( date '+%H:%M:%S %d.%m.%Y' )" "password=$var_pve_ticket_pass" || { echo_err "Ошибка: не удалось создать служебного пользователя ${c_val}${var_pve_ticket_user}"; exit_clear; }
+		pve_api_request '' PUT /access/acl "users=$var_pve_ticket_user" path=/ roles=Administrator || { echo_err "Ошибка: не удалось задать права для служебного пользователя ${c_val}${var_pve_ticket_user}"; exit_clear; }
+	}
+
+    pve_api_request '' PUT "/access/users/$var_pve_ticket_user" "expire=$(( $( date +%s ) + 14400 ))" enable=1 || exit_clear
+	local data
+	data=$( curl -ksf -x '' -d "username=$var_pve_ticket_user&password=$var_pve_ticket_pass" "${config_base[pve_api_url]}/access/ticket" ) || { echo_err "Ошибка: не удалось запросить тикет служебного пользователя ${c_val}${var_pve_ticket_user}"; exit_clear; }
+	[[ "$data" =~ '"ticket":"'([^\"]+) ]] && var_pve_tapi_curl=${BASH_REMATCH[1]} || { echo_err "Ошибка: не удалось получить тикет из ответа API для ${c_val}${var_pve_ticket_user}"; exit_clear; }
+	[[ "$data" =~ '"CSRFPreventionToken":"'([^\"]+) ]] && data=${BASH_REMATCH[1]} || { echo_err "Ошибка: не удалось получить тикет из ответа API для ${c_val}${var_pve_ticket_user}"; exit_clear; }
+
+	var_pve_tapi_curl=( curl -ksG -x '' -w '\n%{http_code}' --connect-timeout 5 -H "CSRFPreventionToken:$data" -b "PVEAuthCookie=$var_pve_tapi_curl" )
+
+    "${var_pve_tapi_curl[@]}" "${config_base[pve_api_url]}/version" -f -X GET >/dev/null || { echo_err 'Не удалось получить версию PVE через API (ticket)'; exit_clear; }
+}
+
+function pve_tapi_request() {
+    [[ "$2" == '' || "$3" == '' ]] && { echo_err 'Ошибка: нет подходящих аргументов или токена для pve_tapi_request'; exit_clear; }
+    [[ "$var_pve_tapi_curl" == '' ]] && {
+        configure_api_ticket init; 
+        [[ "$var_pve_tapi_curl" == '' ]] && { echo_err 'Ошибка: не удалось получить API токен для pve_tapi_request'; exit_clear; }
+    }
+
+    local http_code i
+    for i in "${@:4}"; do http_code+=( --data-urlencode "$i" ); done
+    [[ "$1" != '' ]] && local -n ref_result=$1 || local ref_result
+
+    ref_result=$( "${var_pve_tapi_curl[@]}" "${config_base[pve_api_url]}${3}" -X "${2}" "${http_code[@]/'{ticket_user_pwd}'/$var_pve_ticket_pass}" )
+	
+    case $? in
+        0|22) [[ "$ref_result" =~ (.*)$'\n'([0-9]{3})$ ]] || { echo_err "Ошибка pve_api_request: не удалось узнать HTTP_CODE"; configure_api_token clear force; exit_clear; }
+              ref_result=${BASH_REMATCH[1]}
+              http_code=${BASH_REMATCH[2]}
+              [[ $http_code -lt 300 ]] && return 0
+			  [[ $http_code == 401 ]] && {
+                    [[ "$pve_api_request_exit" == 1 ]] && return 1
+					configure_api_ticket init
+                    local pve_api_request_exit=1
+					pve_tapi_request "$@"
+					return $?
+			  }
+              ! [[ $http_code =~ ^(500|501|596)$ ]] && {
+                    echo_err "Ошибка: запрос к API (ticket) был обработан с ошибкой: ${c_val}${*:2}"
+                    echo_err "API пользователь: ${c_val}$var_pve_ticket_user"
+                    echo_err "HTTP код ответа: ${c_val}$http_code"
+                    echo_err "Ответ сервера: ${c_val}$ref_result"
+                    exit_clear
+              }
+              return $http_code;;
+        7|28) echo_err "Не удалось подключиться к PVE API. PVE запущен/работает?";;
+        2)    echo_err "Неизвестная опция curl. Старая версия";;
+        *)    echo_err "Ошибка: не удалось выполнить запрос к API (ticket): ${c_val}${*:2}${c_err}. API пользователь: ${c_val}${var_pve_ticket_user}${c_err}. Код ошибки curl: $?"
+    esac
+    exit_clear
+}
+
+function jq_data_to_array() {
+	[[ "$1" == '' || "$2" == '' ]] && exit_clear
+	
+	local data line var_line i=0
+	set -o pipefail
+	[[ "$1" =~ ^var=(.+) ]] && data=${!BASH_REMATCH[1]} || pve_api_request data GET "$1"
+	data=$( echo -n "$data" | grep -Po '(?(DEFINE)(?<str>"[^"\\]*(?:\\.[^"\\]*)*")(?<other>null|true|false|[0-9\-\.Ee\+]+)(?<arr>\[[^\[\]]*+(?:(?-1)[^\[\]]*)*+\])(?<obj>{[^{}]*+(?:(?-1)[^{}]*)*+}))(?:^\s*{\s*(?:(?&str)\s*:\s*(?:(?&other)|(?&str)|(?&arr)|(?&obj))\s*,\s*)*?"data"\s*:\s*(?:\[|(?={))|\G\s*,\s*)(?:(?:(?&other)|(?&str)|(?&arr))\s*,\s*)*\K(?>(?&obj)|)(?=\s*(?:\]|})|\s*,[^,])' ) \
+        || { echo_err "Ошибка jq_data_to_array: не удалось получить корректные JSON данные от API: ${c_val}GET '$1'"$'\n'"API_DATA: $data"; exit_clear; }
+	
+    local -n ref_dict_table=$2
+    [[ "${#data}" == 0 ]] && { ref_dict_table[count]=0; return 0; }
+
+	while read -r line || [[ -n $line ]]; do
+		while read -r var_line || [[ -n $var_line ]]; do
+			[[ "$var_line" =~ ^\"([^\"\\]*(\\.[^\"\\]*)*)\"\ *:\ *\"?(.*[^\"]|) ]] || { echo_err "Ошибка parse_json: некорректный bash парсинг: ${c_val}'$var_line'"; exit_clear; }
+			ref_dict_table[$i,${BASH_REMATCH[1]}]=${BASH_REMATCH[3]}
+		done < <( echo -n "$line" | grep -Po '(?(DEFINE)(?<str>"[^"\\]*(?:\\.[^"\\]*)*")(?<other>null|true|false|[0-9\-\.Ee\+]+)(?<arr>\[[^\[\]]*+(?:(?-1)[^\[\]]*)*+\])(?<obj>{[^{}]*+(?:(?-1)[^{}]*)*+}))(?:^\s*{\s*|\G\s*,\s*)\K(?:(?&str)\s*:\s*(?:(?&other)|(?&str)|(?&arr)|(?&obj)))(?=\s*}|\s*,[^,])' || { echo_err "Ошибка jq_data_to_array: ошибка парсинга ответа API: ${c_val}GET '$1'"$'\n'"Line $i: $line"; exit_pid; } )
+        ((i++))
+    done <<<$data
+	set +o pipefail
+    ref_dict_table[count]=$i
+}
 
 function show_config() {
     local i=0
