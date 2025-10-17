@@ -1173,108 +1173,148 @@ function run_cmd() {
 function deploy_stand_config() {
 
     function set_netif_conf() {
-        [[ "$1" == '' || "$2" == '' && "$1" != test ]] && echo_err 'Ошибка: set_netif_conf нет аргумента' && exit 1
-        [[ "$1" == 'test' ]] && { [[ "$netifs_type" =~ ^(e1000|e1000-82540em|e1000-82544gc|e1000-82545em|e1000e|i82551|i82557b|i82559er|ne2k_isa|ne2k_pci|pcnet|rtl8139|virtio|vmxnet3)$ ]] && return 0; echo_err "Ошибка: указаный в конфигурации модель сетевого интерфейса '$netifs_type' не является корректным [e1000|e1000-82540em|e1000-82544gc|e1000-82545em|e1000e|i82551|i82557b|i82559er|ne2k_isa|ne2k_pci|pcnet|rtl8139|virtio|vmxnet3]"; exit 1; }
+        [[ "$1" == '' || "$2" == '' && "$1" != test ]] && { echo_err 'Ошибка: set_netif_conf нет аргумента'; exit_clear; }
+        #[[ "$data_aviable_net_models" == '' ]] && { data_aviable_net_models=$( kvm -net nic,model=help | awk 'NR!=1{if($1=="virtio-net-pci")print "virtio";print $1}' ) || { echo_err "Ошибка: не удалось получить список доступных моделей сетевых устройств"; exit_clear; } }
+        [[ "$1" == 'test' ]] && { 
+            local data_aviable_net_models=$'e1000\ne1000-82540em\ne1000-82544gc\ne1000-82545em\ne1000e\ni82551\ni82557b\ni82559er\nne2k_isa\nne2k_pci\npcnet\nrtl8139\nvirtio\nvmxnet3'
+            grep -Fxq "$netifs_type" <<<$data_aviable_net_models && return 0
+            echo_err "Ошибка: указаный в конфигурации модель сетевого интерфейса '$netifs_type' не является корректным"
+            echo_err "Список доступных моделей можно узнать командой ${c_val}kvm -net nic,model=help"
+            exit_clear
+        }
 
-        [[ ! "$1" =~ ^network_?([0-9]+)$ ]] && { echo_err "Ошибка: опция конфигурации ВМ network некорректна '$1'"; exit 1; }
+        [[ ! "$1" =~ ^network_?([0-9]+)$ ]] && { echo_err "Ошибка: опция конфигурации ВМ network некорректна '$1'"; exit_clear; }
     
+        function gen_mac() {
+            local i char mac_str mac_templ=$( echo "$1" | tr -d '\.\-:' | grep -io '^[0-9A-FX]*$' )
+            
+            [[ ! $mac_templ || ${#mac_templ} -gt 12 ]] && { echo_err "Ошибка конфигурации: некорректный шаблон MAC-адреса: $1"; return 1; }
+            
+            mac_templ=${mac_templ^^}
+            for (( i=0; i<12; i++ )); do
+                char=${mac_templ:$i:1}
+                if [[ ! $char || $char == X ]]; then
+                    mac_str+=$( printf "%X" $(( RANDOM % 16 )) )
+                else
+                    mac_str+=$char
+                fi
+            done
+
+            echo "$mac_str" | sed -r 's/(..)(..)(..)(..)(..)(..)/\1:\2:\3:\4:\5:\6/'
+        }
+
         function add_bridge() {
             local iface="$1" if_desc="$2" special
-            [[ "$4" == "" ]] && not_special=true || not_special=false
+            [[ "$4" == "" ]] && special=false || special=true
             if [[ "$iface" == "" ]]; then
                 create_if=true
-                for i in ${!vmbr_ids[@]}; do
+                for i in "${!vmbr_ids[@]}"; do
                     [[ -v "Networking[vmbr${vmbr_ids[$i]}]" ]] && continue
                     echo "$pve_net_ifs" | grep -Fxq -- "vmbr${vmbr_ids[$i]}" || { iface="vmbr${vmbr_ids[$i]}"; unset 'vmbr_ids[$i]'; break; }
                 done
             fi
 
-            Networking["$iface"]="$if_desc"
-            $not_special && cmd_line+=" --net$if_num '${netifs_type:-virtio},bridge=$iface$net_options'"
+            Networking[$iface]="$if_desc"
+            ! $special && cmd_line+=" --net$if_num '${netifs_type:-virtio}${if_mac:+"=$if_mac"},bridge=$iface$net_options'"
 
             if_desc=${if_desc/\{0\}/$stand_num}
             $create_if && {
-                echo_verbose "${c_info}Добавление сети $iface : '$if_desc'${c_null}"
-                run_cmd /noexit "pvesh create '/nodes/$( hostname -s )/network' --iface '$iface' --type 'bridge' --autostart 'true' --comments '$if_desc'$vlan_aware --slaves '$vlan_slave'" \
-                    || { read -n 1 -p "Интерфейс '$iface' ($if_desc) уже существует! Выход"; exit 1 ;}
+                run_cmd /noexit pve_api_request return_cmd POST "/nodes/$var_pve_node/network" "'iface=$iface' type=bridge autostart=1 'comments=$if_desc'${vlan_aware}${vlan_slave:+" 'bridge_ports=${vlan_slave}'"}" \
+                    || { echo_err "Интерфейс '$iface' ($if_desc) уже существует! Выход"; exit_clear; } 
+                echo_ok "Создан bridge интерфейс ${c_value}$iface${c_info} : ${c_value}$if_desc"
             }
 
-            $not_special && $create_access_network && ${config_base[access_create]} && { run_cmd /noexit "pveum acl modify '/sdn/zones/localnetwork/$iface' --users '$username' --roles 'PVEAuditor'" || { echo_err "Не удалось создать ACL правило для сетевого интерфейса '$iface' и пользователя '$username'"; exit 1; } }
+            ! $special && $create_access_network && ${config_base[access_create]} && [[ "${vm_config[access_role]}" != NoAccess || "${config_base[access_role]}" == '' && "${config_base[pool_access_role]}" != '' && "${config_base[pool_access_role]}" != NoAccess ]] && [[ "$access_role" != NoAccess ]] && { 
+                $create_if && { run_cmd /noexit pve_api_request return_cmd PUT /access/acl "'path=/sdn/zones/localnetwork/$iface' 'users=$username' 'roles=${access_role:-PVEAuditor}'" || { echo_err "Не удалось создать ACL правило для сетевого интерфейса '$iface' и пользователя '$username'"; exit_clear; } } \
+                    || run_cmd /noexit pve_api_request return_cmd PUT /access/acl "'path=/sdn/zones/localnetwork/$iface' 'groups=$stands_group' 'roles=${access_role:-PVEAuditor}'" || { echo_err "Не удалось создать ACL правило для сетевого интерфейса '$iface' и пользователя '$username'"; exit_clear; }
+            }
             
-            ! $not_special && echo "$iface"
+            $special && eval "$4=$iface"
         }
 
         function get_host_if() {
-            local iface="$1"
-            if [[ "$iface" == inet ]]; then
-                iface="${config_base[inet_bridge]}"
+            local -n ref_out=$1
+            if [[ "$2" == inet ]]; then
+                ref_out=${config_base[inet_bridge]}
             elif [[ "$iface" != "" ]]; then
-                iface="$if_config"
-                echo "$pve_net_ifs" | grep -Fxq -- "$iface" || {
-                    echo_err "Ошибка: указанный статически в конфигурации bridge интерфейс '$iface' не найден"
-                    exit 1
+                ref_out=$if_config
+                echo "$pve_net_ifs" | grep -Fxq -- "$ref_out" || {
+                    echo_err "Ошибка: указанный статически в конфигурации bridge интерфейс '$2' не найден"
+                    exit_clear
                 }
+            else
+                ref_out=
             fi
-            echo $iface
         }
 
-        local if_num=${BASH_REMATCH[1]} if_config="$2" if_desc="$2" create_if=false net_options='' master='' iface='' vlan_aware='' vlan_slave=''
+        local if_num=${BASH_REMATCH[1]} if_config="$2" if_desc="$2" create_if=false net_options='' master='' iface='' vlan_aware='' vlan_slave='' access_role='' if_mac=''
 
-        if [[ "$if_config" =~ ^\{\ *bridge\ *=\ *([0-9\.a-z]+|\"\ *((\\\"|[^\"])+)\")\ *(,.*)?\}$ ]]; then
+        if [[ "$if_config" =~ ^\{\ *bridge\ *=\ *([0-9\.a-zA-Z]+|\"\ *((\\\"|[^\"])+)\")\ *(,.*)?\}$ ]]; then
             if_bridge="${BASH_REMATCH[1]/\\\"/\"}"
             if_desc=$( echo "${BASH_REMATCH[2]/\\\"/\"}" | sed 's/[[:space:]]*$//' )
             if_config="${BASH_REMATCH[4]}"
-            [[ "$if_config" =~ ^.*,\ *state\ *=\ *down\ *($|,.+$) ]] && net_options+=',link_down=1'
-            [[ "$if_config" =~ ^.*,\ *trunks\ *=\ *([0-9\;]*[0-9])\ *($|,.+$) ]] && net_options+=",trunks=${BASH_REMATCH[1]}" && vlan_aware=" --bridge_vlan_aware 'true'"
-            [[ "$if_config" =~ ^.*,\ *tag\ *=\ *([1-9][0-9]{0,2}|[1-3][0-9]{3}|40([0-8][0-9]|9[0-4]))\ *($|,.+$) ]] && net_options+=",tag=${BASH_REMATCH[1]}" && vlan_aware=" --bridge_vlan_aware 'true'"
-            if [[ "$if_config" =~ ^.*,\ *vtag\ *=\ *([1-9][0-9]{0,2}|[1-3][0-9]{3}|40([0-8][0-9]|9[0-4]))\ *($|,.+$) ]]; then
+            [[ "$if_config" =~ ,\ *firewall\ *=\ *1\ *($|,.+$) ]] && net_options+=',firewall=1'
+            [[ "$if_config" =~ ,\ *state\ *=\ *down\ *($|,.+$) ]] && net_options+=',link_down=1'
+            [[ "$if_config" =~ ,\ *vlan_aware\ *=\ *(1|true|yes)\ *($|,.+$) ]] && vlan_aware=' bridge_vlan_aware=1'
+            [[ "$if_config" =~ ,\ *access_role\ *=\ *([a-zA-Z0-9_\-]+)\ *($|,.+$) ]] && $create_access_network && { access_role=${BASH_REMATCH[1]}; set_role_config $access_role; }
+            [[ "$if_config" =~ ,\ *trunks\ *=\ *([0-9\;]*[0-9])\ *($|,.+$) ]] && net_options+=",trunks=${BASH_REMATCH[1]}" && vlan_aware=' bridge_vlan_aware=1'
+            [[ "$if_config" =~ ,\ *tag\ *=\ *([1-9][0-9]{0,2}|[1-3][0-9]{3}|40([0-8][0-9]|9[0-4]))\ *($|,.+$) ]] && net_options+=",tag=${BASH_REMATCH[1]}" && vlan_aware=" bridge_vlan_aware=1"
+            [[ "$if_config" =~ ,\ *mac\ *=\ *([^\ ]+)\ *($|,.+$) ]] && { if_mac=${BASH_REMATCH[1]}; }
+            [[ "$if_config" =~ ,\ *vtag\ *=\ *([1-9][0-9]{0,2}|[1-3][0-9]{3}|40([0-8][0-9]|9[0-4]))\ *($|,.+$) ]] && {
                 local tag="${BASH_REMATCH[1]}"
-                if [[ "$if_config" =~ ^.*,\ *master\ *=\ *([0-9\.a-z]+|\"\ *((\\\"|[^\"])+)\")\ *($|,.+$) ]]; then
+                if [[ "$if_config" =~ ,\ *master\ *=\ *([0-9\.a-z]+|\"\ *((\\\"|[^\"])+)\")\ *($|,.+$) ]]; then
                     local master_desc='' master_if=''
                     master="${BASH_REMATCH[2]/\\\"/\"}"
                     master_desc="$master"
-                    [[ "$master" == "" ]] && master_desc="${BASH_REMATCH[1]}" && master="{bridge=$master_desc}" && master_if=$( get_host_if "${BASH_REMATCH[1]}" )
-                    master_if=$( indexOf Networking "$master" )
-                    [[ "$master_if" == "" ]] && master_if=$( add_bridge "$master_if" "$master" 1 )
+                    [[ "$master" == "" ]] && master_desc="${BASH_REMATCH[1]}" && master="{bridge=$master_desc}" && get_host_if master_if "$master_desc"
+                    master_if=$( indexOf Networking "$master" ) || exit_clear;
+                    [[ "$master_if" == "" ]] && add_bridge "$master_if" "$master" master_if
                     if [[ -v "Networking[${master_if}.$tag]" && "${Networking[${master_if}.$tag]}" != "{vlan=$if_bridge}" ]]; then
-                        echo_err "Ошибка конфигурации: повторная попытка создать VLAN интерфейс для связки с другим Bridge"; exit 1
+                        echo_err "Ошибка конфигурации: повторная попытка создать VLAN интерфейс для связки с другим Bridge"; exit_clear
                     elif [[ ! -v "Networking[$master_if.$tag]" ]]; then
                         [[ "$if_desc" == "" ]] && if_desc="$if_bridge"
-                        echo_verbose "${c_info}Добавление VLAN $master_if.$tag : '$master_desc => $if_desc'${c_null}"
-                        run_cmd /noexit "pvesh create '/nodes/$( hostname -s )/network' --iface '$master_if.$tag' --type 'vlan' --autostart 'true' --comments '$master_desc => $if_desc'" \
-                            || { read -n 1 -p "Интерфейс '$iface' ($if_desc) уже существует! Выход"; exit 1 ;}
+                        run_cmd /noexit pve_api_request return_cmd POST "/nodes/$var_pve_node/network" "'iface=$master_if.$tag' type=vlan autostart=1 'comments=$master_desc => $if_desc'" \
+                            || { echo_err "Интерфейс '$iface' ($if_desc) уже существует! Выход"; exit_clear; }
+                        echo_ok "Создан VLAN интерфейс $master_if.$tag : '$master_desc => $if_desc'${c_null}"
                         Networking["${master_if}.$tag"]="{vlan=$if_bridge}"
                     fi
                     vlan_slave="$master_if.$tag"
+                else
+                    echo_err "Ошибка конфигурации: интерфейс '$2': объявлен master интерфейс, но не объявлен vlan tag"; exit_clear
                 fi
-            elif [[ "$if_config" =~ ^.*,\ *master\ *=\ *([0-9\.a-z]+|\"((\\\"|[^\"])+)\")\ *($|,.+$) ]]; then
-                echo_err "Ошибка конфигурации: интерфейс '$2': объявлен master интерфейс, но не объявлен vlan tag"; exit 1
-            fi
+            }
             [[ "$if_desc" == "" ]] && if_config="$if_bridge" && if_desc="{bridge=$if_bridge}" || if_config=""
         elif [[ "$if_desc" =~ ^\{.*\}$ ]]; then 
             echo_err "Ошибка: некорректное значение подстановки настройки '$1 = $2' для ВМ '$elem'"
-            exit 1
+            exit_clear
         else
             if_config=""
         fi
 
+        [[ $netifs_mac && ! $if_mac ]] && { if_mac=$netifs_mac; }
+        [[ $if_mac ]] && { if_mac=$( gen_mac "$if_mac" ) || exit_clear; }
+
         for net in "${!Networking[@]}"; do
             [[ "${Networking["$net"]}" != "$if_desc" ]] && continue
-            cmd_line+=" --net$if_num '${netifs_type:-virtio},bridge=$net$net_options'"
+            cmd_line+=" --net$if_num '${netifs_type:-virtio}${if_mac:+"=$if_mac"},bridge=$net$net_options'"
             ! $opt_dry_run && [[ "$vlan_slave" != '' || "$vlan_aware" != '' ]] && ! [[ "$vlan_slave" != '' && "$vlan_aware" != '' ]] && {
-                local port_info=$( pvesh get "/nodes/$( hostname -s )/network/$net" --output-format yaml )
-                local if_options=''
-                if [[ "$vlan_slave" != '' ]]; then
-                    echo "$port_info" | grep -Pq $'^bridge_vlan_aware: 1$' && if_options="--bridge_vlan_aware 'true'"
-                else
-                    if_options="--slaves '$( echo "$port_info" | grep -Po $'^bridge_ports: \K[^\']+$' )'" || if_options=''
-                fi
-                [[ "$if_options" != '' ]] && run_cmd "pvesh set '/nodes/$( hostname -s )/network/$net' --type 'bridge' $if_options"
+                local port_info if_update=false
+                pve_api_request port_info GET "/nodes/$var_pve_node/network/$net" || { echo_err "Ошибка: не удалось получить параметры сетевого интерфейса ${c_val}$net"; exit_clear; }
+
+                [[ "$port_info" =~ (,|\{)\"bridge_vlan_aware\":1(,|\}) ]] && vlan_aware=' bridge_vlan_aware=1' || { [[ "$vlan_aware" != '' ]] && if_update=true; }
+                [[ "$port_info" =~ (,|\{)\"bridge_ports\":\"([^\"]+)\" ]] && {
+                    { [[ "$vlan_slave" == '' ]] || printf '%s\n' ${BASH_REMATCH[2]} | grep -Fxq -- "$vlan_slave"; } && vlan_slave="${BASH_REMATCH[2]}" || {
+                        vlan_slave="$vlan_slave ${BASH_REMATCH[2]}"
+                        if_update=true
+                    }
+                } || [[ "$vlan_slave" != '' ]] && if_update=true
+                
+                $if_update && run_cmd pve_api_request return_cmd PUT "/nodes/$var_pve_node/network/$net" "type=bridge${vlan_aware}${vlan_slave:+" 'bridge_ports=${vlan_slave}'"}"
             }
             return 0
         done
 
-        iface=$( get_host_if "$if_config" )
+        get_host_if iface "$if_config"
         
         add_bridge "$iface" "$if_desc"
         return 0
@@ -1328,28 +1368,29 @@ function deploy_stand_config() {
     }
 
     function set_role_config() {
-        [[ "$1" == '' ]] && echo_err 'Ошибка: set_role_conf нет аргумента' && exit 1
-        local roles=$( echo "$1" | sed 's/,/ /g;s/  \+/ /g;s/^ *//g;s/ *$//g' )
-        local i role set_role role_exists
-        for set_role in $roles; do
-            role_exists=false
-            for ((i=1; i<=$(echo -n "${roles_list[roleid]}" | grep -c '^'); i++)); do
-                role=$( echo "${roles_list[roleid]}" | sed -n "${i}p" )
-                [[ "$set_role" != "$role" ]] && continue
-                if [[ -v "config_access_roles[$set_role]" ]]; then
-                    [[ "$( echo "${roles_list[privs]}" | sed -n "${i}p" )" != "${config_access_roles[$set_role]}" ]] \
-                        && run_cmd /noexit "pvesh set '/access/roles/$set_role' --privs '${config_access_roles[$set_role]}'"
-                fi
-                role_exists=true
-                break
-            done
-            ! $role_exists && {
-                [[ ! -v "config_access_roles[$set_role]" ]] && { echo_err "Ошибка: в конфигурации для установки ВМ '$elem' установлена несуществующая access роль '$set_role'. Выход"; exit 1; }
-                run_cmd "pvesh create /access/roles --roleid '$set_role' --privs '${config_access_roles[$set_role]}'"
-                roles_list[roleid]+=$'\n'$set_role
-                roles_list[privs]+=$'\n'${config_access_roles[$set_role]}
+        [[ "$1" == '' ]] && { echo_err "Ошибка $FUNCNAME: нет аргумента"; exit_clear; }
+        [[ "$1" =~ ^[a-zA-Z0-9._-]+$ ]] || { echo_err "Ошибка $FUNCNAME: указанное имя роли '$1' некорректное"; exit_clear; }
+        local i role role_exists
+        role_exists=false
+        for ((i=1; i<=$( echo -n "${roles_list[roleid]}" | grep -c \^ ); i++)); do
+            role=$( echo "${roles_list[roleid]}" | sed "${i}q;d" )
+            [[ "$1" != "$role" ]] && continue
+            [[ -v "config_access_roles[$1]" && "$( echo "${roles_list[privs]}" | sed "${i}q;d" )" != "${config_access_roles[$1]}" ]] && {
+                    run_cmd pve_api_request return_cmd PUT "/access/roles/$1" "'privs=${config_access_roles[$1]}'"
+                    echo_ok "Обновлены права access роли ${c_val}$1"
+                    roles_list[roleid]=$( echo "$1"; echo -n "${roles_list[roleid]}" )
+                    roles_list[privs]=$( echo "${config_access_roles[$1]}"; echo -n "${roles_list[privs]}" )
             }
+            role_exists=true
+            break
         done
+        ! $role_exists && {
+            [[ ! -v "config_access_roles[$1]" ]] && { echo_err "Ошибка: в конфигурации для установки ВМ '$elem' установлена несуществующая access роль '$1'. Выход"; exit_clear; }
+            run_cmd pve_api_request return_cmd POST /access/roles "'roleid=$1' 'privs=${config_access_roles[$1]}'"
+            echo_ok "Создана access роль ${c_val}$1"
+            roles_list[roleid]=$( echo "$1"; echo -n "${roles_list[roleid]}" )
+            roles_list[privs]=$( echo "${config_access_roles[$1]}"; echo -n "${roles_list[privs]}" )
+        }
     }
 
     function set_machine_type() {
@@ -1477,7 +1518,7 @@ function deploy_stand_config() {
         ((vmid++))
     done
 
-    echo_ok "${c_lcyan}Конфигурирование стенда $stand_num завершено${c_null}"
+    echo_ok "Конфигурирование стенда ${c_value}$pool_name${c_null} завершено"
 }
 
 function deploy_access_passwd() {
