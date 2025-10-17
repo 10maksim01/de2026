@@ -533,58 +533,109 @@ function get_url_filename() {
 
 function get_file() {
 
-    [[ "$1" == '' ]] && exit 1
-
+    [[ "$1" == '' ]] && exit_clear
     local -n url="$1"
-    local base_url="$url"
-    local md5=$(echo $url | md5sum)
-    md5="h${md5::-3}"
 
-    [[ -v list_img_files["$md5"] && -r "${list_url_files[$md5]}" ]] && url="${list_url_files[$md5]}" && return 0
+    [[ -v list_url_files[${4:-$url}] ]] && url="${list_url_files[${4:-$url}]}" && return 0
 
+    local base_url=$url is_url=false max_filesize=${2:-5368709120} filesize='' filename='' file_sha256='' file_md5='' force=$( [[ "$3" == force ]] && echo true || echo false )
+    isdigit_check "$max_filesize" || { echo_err "Ошибка $FUNCNAME: max_filesize=$max_filesize не число"; exit_clear; }
 
-    local max_filesize=${2:-5368709120}
-    local filesize='' filename='' file_sha256=''
-    isdigit_check "$max_filesize" || { echo_err "Ошибка get_file max_filesize=$max_filesize не число" && exit 1; }
-    local force=$( [[ "$3" == force ]] && echo true || echo false )
-
-    if [[ "$url" =~ ^https://disk\.yandex\.ru/ ]]; then
-        yadisk_url url filesize=size filename=name file_sha256=sha256
-    elif isurl_check "$url"; then
-        filesize=$(get_url_filesize $url)
-        filename=$(get_url_filename $url)
+    if [[ $3 == diff ]]; then
+        local diff_base=$url
+        url=$4
     fi
-    if isurl_check "$url"; then
-        isdigit_check $filesize && [[ "$filesize" -gt 0 ]] && maxfilesize=$filesize || filesize='0'
-        if [[ "$filename" == '' ]]; then
-            filename="$(mktemp 'ASDaC_noname_downloaded_file.XXXXXXXXXX' -p "${config_base[mk_tmpfs_imgdir]}")"
+    if isurl_check "$url"; then is_url=true; fi
+
+    if [[ "$url" =~ ^https://(www\.)?(disk\.yandex\.(ru|com|com\.tr|net)|yadi\.sk)/ ]]; then
+        get_yadisk_url_info url filesize=size filename=name file_sha256=sha256
+        echo_verbose "[YADISK API REQUEST] FILE: ${c_value}$filename${c_null} SIZE: ${c_value}$filesize${c_null} SHA-256: ${c_value}$file_sha256${c_null}"
+    elif $is_url; then
+        get_url_fileinfo $url filesize=size filename=name
+    fi
+    if [[ $3 == iso ]]; then
+        [[ ! $sel_iso_storage_path ]] && {
+            sel_iso_storage_path=
+            pve_api_request sel_iso_storage_path GET /storage/${config_base[iso_storage]}
+            sel_iso_storage_path=$( echo -n "$sel_iso_storage_path" | grep -Po '({|,)\s*"path"\s*:\s*"\K[^"]+' )
+        }
+        local norm_filename
+        if $is_url; then
+            [[ ! $filesize || $filesize == 0 ]] && { echo_err "Ошибка $FUNCNAME: не удалось получить размер файла ISO: '$url'"; exit_clear; }
+            [[ ${#filename} -eq 0 ]] && filename="noname_$filesize.iso"
+            norm_filename=$( echo -n "$filename" | sed 's/[^a-zA-Z0-9_.-]/_/g' | grep -Pio '^.*?(?=([-._]pve[-._]asdac([-._]bash)?|).iso$)' )
+            norm_filename+='.PVE-ASDaC.iso'
         else
+            norm_filename=$( echo -n "$url" | sed 's/^.*\///;s/[^a-zA-Z0-9_.-]/_/g' | grep -Pio '^.*?(?=([-._]pve[-._]asdac([-._]bash)?|).iso$)' )
+            norm_filename+='.PVE-ASDaC.iso'
+            [[ "$url" == "$sel_iso_storage_path/template/iso/"* ]] && norm_filename=$( echo -n "$url" | grep -Po '.*/\K.*' )
+        fi
+        [[ ${#norm_filename} -eq 0 ]] && { echo_err "Ошибка $FUNCNAME: некорректное имя файла для ISO тип файла: '$filename'"; exit_clear; }
+        [[ ${#norm_filename} -gt 200 ]] && { echo_err "Ошибка $FUNCNAME: имя файла ISO '$filename' больше 200 символов"; exit_clear; }
+
+        filename="$sel_iso_storage_path/template/iso/$norm_filename"
+    fi
+
+    if $is_url; then
+        isdigit_check $filesize && [[ "$filesize" -gt 0 ]] && maxfilesize=$filesize || filesize='0'
+        if [[ ! $filename ]]; then
+            filename="$( mktemp 'ASDaC_noname_downloaded_file.XXXXXXXXXX' -p "${config_base[mk_tmpfs_imgdir]}" )"
+        elif [[ $3 != iso ]]; then
             filename="${config_base[mk_tmpfs_imgdir]}/$filename"
         fi
         if [[ $filesize -gt $max_filesize ]]; then
             if $force && [[ "$filesize" -le $(($filesize+4194304)) ]]; then
-                echo_warn "Предупреждение: загружаемый файл $filename больше разрешенного значения: $((filesize/1024/1024/1024)) ГБ"
+                echo_warn "Предупреждение: загружаемый файл '$filename' больше разрешенного значения: $((filesize/1024/1024/1024)) ГБ"
                 max_filesize=$(($filesize+4194304))
             else
                 echo_err 'Ошибка: загружаемый файл больше разрешенного размера или сервер отправил ответ о неверном размере файла'
-                exit 1
+                exit_clear
             fi
         fi
-        [[ -r "$filename" ]] && [[ "$filesize" == '0' || "$( wc -c "$filename" | awk '{printf $1;exit}' )" == "$filesize" ]] \
-        && [[ "$filesize" -gt 655360 && "${#file_sha256}" != 64 || "$( sha256sum "$filename" | awk '{printf $1}' )" == "$file_sha256" ]] || {
-            configure_imgdir add-size $max_filesize
-            echo_tty "[${c_info}Info${c_null}] Скачивание файла ${c_value}$filename${c_null} Размер: ${c_value}$( echo "$filesize" | awk 'BEGIN{split("Б|КБ|МБ|ГБ|ТБ",x,"|")}{for(i=1;$1>=1024&&i<length(x);i++)$1/=1024;printf("%3.1f %s", $1, x[i]) }' )${c_null} URL: ${c_value}$base_url${c_null}"
-            [[ "$base_url" != "$url" ]] && echo_verbose "Download URL: ${c_value}$url${c_null}"
-            echo_verbose "SIZE: ${c_value}$filesize${c_null} SHA-256: ${c_value}$file_sha256${c_null}"
-            curl --max-filesize $max_filesize -GL "$url" -o "$filename" || { echo_err "Ошибка скачивания файла ${c_value}$filename${c_null} URL: ${c_value}$url${c_null}. Выход"; exit 1; }
-            # | iconv -f windows-1251 -t utf-8 > $tempfile
-        }
+        [[ -e "$filename" && ! -f "$filename" ]] && { echo_err "Ошибка: Попытка скачать файл в '$filename': этот файловый путь уже используется"; exit_clear; }
+        if $opt_force_download || ! { [[ -r "$filename" ]] && [[ "$filesize" == '0' || "$( wc -c "$filename" | awk '{printf $1;exit}' )" == "$filesize" ]] \
+        && [[ "$filesize" -gt 102400 || "${#file_sha256}" != 64 || "$( sha256sum "$filename" | awk '{printf $1}' )" == "$file_sha256" ]]; }; then
+            [[ $3 != iso ]] && configure_imgdir add-size $max_filesize
+            echo_tty "[${c_info}Info${c_null}] Скачивание файла ${c_value}${filename##*/}${c_null} Размер: ${c_value}$( echo "$filesize" | awk 'BEGIN{split("Б|КБ|МБ|ГБ|ТБ",x,"|")}{for(i=1;$1>=1024&&i<length(x);i++)$1/=1024;printf("%3.1f %s", $1, x[i]) }' )${c_null} URL: ${c_value}${4:-$base_url}${c_null}"
+            curl --max-filesize $max_filesize -fGL "$url" -o "$filename" || { echo_err "Ошибка скачивания файла ${c_value}$filename${c_err} URL: ${c_value}$url${c_err} curl exit code: $?"; exit_clear; }
+            
+            [[ -r "$filename" ]] || { echo_err "Файл $filename недоступен"; exit_clear; }
+            [[ "$filesize" == '0' || "$( wc -c "$filename" | awk '{printf $1;exit}' )" == "$filesize" ]] || { echo_warn "Ошибка скачивания файла ${c_value}$filename${c_err}: размер файла не совпадает со значением, которое отправил сервер. URL: ${c_value}$url${c_err}"$'\n'"Размер скачанного файла: ${c_value}$( wc -c "$filename" | awk '{printf $1;exit}' )${c_err} Ожидалось: ${c_value}$filesize${c_err}"; filesize=0; }
+            [[ "$filesize" -gt 102400 || "${#file_sha256}" != 64 || "$( sha256sum "$filename" | awk '{printf $1}' )" == "$file_sha256" ]] || { echo_err "Ошибка скачивания файла ${c_value}$filename${c_err}: хеш сумма SHA-256 не совпадает с заявленной. URL: ${c_value}$url${c_err}"$'\n'"Хеш скачанного файла: ${c_value}$( sha256sum "$filename" | awk '{printf $1}' )${c_err} Ожидалось: ${c_value}$file_sha256${c_err}"; exit_clear; }
+            ### | iconv -f windows-1251 -t utf-8 > $tempfile
+        fi
         url="$filename"
+    elif [[ $3 == iso ]]; then
+        filesize=$( wc -c "$url" | awk '{printf $1;exit}' )
+        [[ "$filesize" -le 102400 ]] && file_sha256=$( sha256sum "$url" | awk '{printf $1;exit}' )
+        if $opt_force_download || ! { [[ -r "$filename" ]] && [[ "$filesize" == '0' || "$( wc -c "$filename" | awk '{printf $1;exit}' )" == "$filesize" ]] \
+        && [[ "${#file_sha256}" != 64 || "$( sha256sum "$filename" | awk '{printf $1}' )" == "$file_sha256" ]]; }; then
+            echo_tty "[${c_info}Info${c_null}] Копирование ISO файла ${c_value}$url${c_null} в ${c_value}$filename${c_null} Размер: ${c_value}$( echo "$filesize" | awk 'BEGIN{split("Б|КБ|МБ|ГБ|ТБ",x,"|")}{for(i=1;$1>=1024&&i<length(x);i++)$1/=1024;printf("%3.1f %s", $1, x[i]) }' )${c_null}"
+            cp -f "$url" "$filename"
+        fi
     else
         filename=$url
     fi
-    [[ -r "$filename" ]] || { echo_err "Ошибка: файл '$filename' должен существовать и быть доступен для чтения"; exit 1; }
-    list_url_files["$md5"]="$url"
+    [[ -r "$filename" ]] || { echo_err "Ошибка: файл '$filename' должен существовать и быть доступен для чтения"; exit_clear; }
+    [[ $3 == iso ]] && url=$( grep -Po '.*/\K.*' <<<$filename )
+    [[ $3 == diff ]] && {
+        local diff_full diff_backing convert_threads convert_compress
+        convert_threads=$( lscpu | awk '/^Core\(s\) per socket:/ {cores=$4} /^Socket\(s\):/ {sockets=$2} END{n=cores*sockets;if(n>16) print 16; else print n}' )
+        convert_compress=$( awk '/MemAvailable/ {if($2<16000000) {exit 1} }' /proc/meminfo || printf '-c' )
+        ${config_base[convert_full_compress]} && convert_compress='-c'
+        [[ ! -v var_tmp_img ]] && var_tmp_img=()
+        diff_backing=$( qemu-img info --output=json "$url" | grep -Po '"backing-filename"\s*:\s*"\K[^"]+'; printf 2 ) || { echo_err "Ошибка: диск '$url' не является qcow2 overlay образом"; exit_clear; }
+        diff_backing=${diff_backing::-2}
+        diff_full=$( mktemp -up "${config_base[mk_tmpfs_imgdir]}" "diff_full-XXXX.${filename##*/}" )
+        configure_imgdir add-size "$( wc -c "$diff_base" "$url" | awk 'END{print $1}' )"
+        echo_tty "[${c_info}Info${c_null}] Формирование full${convert_compress:+(compress)} образа для ${filename##*/}"
+        qemu-img rebase -u -F qcow2 -b "$diff_base" "$url" || { echo_err "Ошибка: манипуляция с диском '$url' завершилась с ошибкой. qemu-img rebase exit code: $?"; exit_clear; }
+        var_tmp_img+=( "$diff_full" )
+        qemu-img convert -m $convert_threads $convert_compress -O qcow2 "$url" "$diff_full" || { echo_err "Ошибка: создание полного образа '$url' завершилось с ошибкой. qemu-img convert exit code: $?"; exit_clear; }
+        qemu-img rebase -u -F qcow2 -b "$diff_backing" "$url" || { echo_err "Ошибка: откат манипуляции с диском '$url' завершилось с ошибкой. qemu-img rebase exit code: $?"; exit_clear; }
+        url="$diff_full"
+    }
+    list_url_files[${4:-$base_url}]=$url
 }
 
 function set_configfile() {
