@@ -1134,6 +1134,11 @@ function get_dict_values() {
     done
 }
 
+function get_dict_value() {
+    [[ "$1" == '' || "$2" == '' ]] && { echo_err "Ошибка get_dict_value"; exit_pid; }
+    local -n "ref_config_var=$1"
+    echo -n "$ref_config_var" | grep -Po "^$2 = \K.*"
+}
 
 function run_cmd() {
     local to_exit=true
