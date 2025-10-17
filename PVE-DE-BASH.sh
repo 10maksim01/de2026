@@ -383,7 +383,9 @@ function show_help() {
         -sctl, --silent-control$t$_opt_silent_control
 EOL
 }
-
+function exit_pid() {
+    kill $var_script_pid
+}
 
 function show_config() {
     local i=0
