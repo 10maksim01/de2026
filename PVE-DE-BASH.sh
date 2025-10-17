@@ -1295,37 +1295,19 @@ function deploy_stand_config() {
     }
 
     function set_machine_type() {
-        [[ "$1" == '' ]] && { echo_err "Ошибка: $FUNCNAME нет аргумента"; exit_clear; }
-        [[ ! $data_kvm_machine_list ]] && {
-            if ! pve_api_request data_kvm_machine_list GET /nodes/$var_pve_node/capabilities/qemu/machines; then
-                wcho_warn "Предупреждение: не удалось получить список совместимых machines через API"
-                data_kvm_machine_list=$( set -o pipefail; kvm -machine help | awk 'NR>1&&/q35|i440fx/{print $1}' | sort -Vr ) \
-                    || { echo_err "Ошибка: $FUNCNAME: не удалось получить список поддерживаемых machine"; exit_clear; }
-            else
-                data_kvm_machine_list=$( grep -Po '({|,)\s*"id"\s*:\s*"\K[^"]+|({|,)\s*"type"\s*:\s*"\K[^"]+' <<<$data_kvm_machine_list | sed 's/^i440fx$/pc/' | sort -uVr )
-            fi
-        }
-        local type=${1//./\\.}
-        type=$( grep -Px -m 1 "${type//+/\\+}" <<<$data_kvm_machine_list ) || {
-            type=$1
+        [[ "$1" == '' ]] && echo_err 'Ошибка: set_disk_conf нет аргумента' && exit 1
+        local machine_list=$( kvm -machine help | awk 'NR>1{print $1}' )
+        local type=$1
+        if ! echo "$machine_list" | grep -Fxq "$type"; then
             if [[ "$type" =~ ^((pc)-i440fx|pc-(q35))-[0-9]+.[0-9]+$ ]]; then
                 type=${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}
-                echo_warn "[Предупреждение]: в конфигурации ВМ '$elem' указанный тип машины '$1' не существует в этой версии PVE/QEMU. Заменен на последнюю доступную версию типа ${type/pc/i440fx}"
+                echo_warn "[Предупреждение]: в конфигурации ВМ '$elem' указанный тип машины '$1' не существует в этой версии PVE/QEMU. Заменен на последнюю доступную версию pc-${type/pc/i440fx}"
             else
                 echo_err "Ошибка: в конфигурации ВМ '$elem' указан неизвестный тип машины '$1'. Ошибка или старая версия PVE?. Выход"
-                exit_clear
+                exit 1
             fi
-        }
+        fi
         cmd_line+=" --machine '$type'"
-    }
-
-    function set_firewall_opt() {
-        [[ "$1" == '' ]] && return 1
-        local opt=''
-        echo -n "$1" | grep -Pq '^{[^{}]*}$' || { echo_err "Ошибка set_firewall_opt: ВМ '$elem' некорректный синтаксис"; exit_clear; }
-        echo -n "$1" | grep -Pq '(^{|,) ?enable ?= ?1 ?(,? ?}$|,)' && opt+=" enable=1"
-        echo -n "$1" | grep -Pq '(^{|,) ?dhcp ?= ?1 ?(,? ?}$|,)' && opt+=" dhcp=1"
-        [[ "$opt" != '' ]] && run_cmd pve_api_request return_cmd PUT "/nodes/$var_pve_node/qemu/$vmid/firewall/options" "${opt}"
     }
 
     [[ "$1" == '' ]] && { echo_err "Внутренняя ошибка скрипта установки стенда"; exit_clear; }
