@@ -346,6 +346,34 @@ function parse_noborder_table() {
 }
 
 # Объявление основных функций
+function configure_clear() {
+    ! $opt_not_tmpfs && {
+        local lower_nextid
+        pve_api_request lower_nextid GET /cluster/options
+        lower_nextid=$( echo -n "$lower_nextid" | grep -Po '({|,)"next-id":{([^{}\[\]]*?,)?"lower":"\K\d+' )
+        [[ "$lower_nextid" != '' &&  "$lower_nextid" == "$(( ${config_base[start_vmid]} + ${#opt_stand_nums[@]} * 100 ))" ]] && run_cmd pve_api_request return_cmd PUT /cluster/options delete=next-id
+        ex_var=0
+        opt_not_tmpfs=true
+        configure_imgdir clear force
+    }
+    configure_api_ticket clear
+    configure_api_token clear
+    ex_var=1
+}
+
+function exit_clear() { 
+    ((ex_var++))
+    [[ "$ex_var" == 1 ]] && configure_clear
+    echo $'\e[m' > /dev/tty
+    exit ${1-1}
+}
+trap exit_clear EXIT
+
+var_script_pid=$$
+
+function exit_pid() {
+    kill $var_script_pid
+}
 
 function show_help() {
     local t=$'\t'
