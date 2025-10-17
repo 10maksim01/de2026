@@ -1116,18 +1116,18 @@ function get_dict_config() {
     done < <(printf '%s' "$config_var")
 }
 
-function get_dict_value() {
-    [[ "$1" == '' || "$2" == '' ]] && { echo_err "Ошибка get_dict_value"; exit 1; }
+function get_dict_values() {
+    [[ "$1" == '' || "$2" == '' ]] && { echo_err "Ошибка get_dict_values"; exit_clear; }
 
     local -n "config_var1=$1"
     local -A dict
-    get_dict_config config_var1 dict noexit
+    get_dict_config "$1" dict noexit
     shift
     while [[ "$1" != '' ]]; do
-        [[ "$1" =~ ^[a-zA-Z\_][0-9a-zA-Z\_]{0,32}(\[[a-zA-Z\_][[0-9a-zA-Z\_]{0,32}\])?\=[a-zA-Z\_]+$ ]] || { echo_err "Ошибка get_dict_value: некорректый аргумент '$1'"; exit 1; }
+        [[ "$1" =~ ^[a-zA-Z\_][0-9a-zA-Z\_]{0,32}(\[[a-zA-Z\_][[0-9a-zA-Z\_]{0,32}\])?\=[a-zA-Z\_]+$ ]] || { echo_err "Ошибка get_dict_values: некорректый аргумент '$1'"; exit_clear; }
         local -n ref_var="${1%=*}"
         local opt_name="${1#*=}"
-        for opt in ${!dict[@]}; do
+        for opt in "${!dict[@]}"; do
             [[ "$opt" == "$opt_name" ]] && ref_var=${dict[$opt]} && break
         done
         shift
