@@ -8,6 +8,7 @@ trap ex INT
 echo $'\nProxmox VE Automatic stand deployment and configuration script by AF\n' >> /dev/tty
 
 ############################# -= Конфигурация =- #############################
+shopt -s extglob
 
 # Необходимые команды для работы на скрипта
 script_requirements_cmd=( curl qm pvesh pvesm pveum qemu-img kvm md5sum )
@@ -1200,28 +1201,48 @@ function deploy_stand_config() {
     }
 
     function set_disk_conf() {
-        [[ "$1" == '' || "$2" == '' && "$1" != test ]] && echo_err 'Ошибка: set_disk_conf нет аргумента' && exit 1
-        [[ "$1" == 'test' ]] && { [[ "$disk_type" =~ ^(ide|sata|scsi|virtio)$ ]] && return 0; echo_err "Ошибка: указаный в конфигурации тип диска '$disk_type' не является корректным [ide|sata|scsi|virtio]"; exit 1; }
-        [[ ! "$1" =~ ^(boot_|)disk_?[0-9]+ ]] && { echo_err "Ошибка: неизвестный параметр ВМ '$1'" && exit 1; }
+        [[ "$1" == '' || "$2" == '' && "$1" != test ]] && { echo_err 'Ошибка: set_disk_conf нет аргумента'; exit_clear; }
+        [[ "$1" == 'test' ]] && { [[ "$disk_type" =~ ^(ide|sata|scsi|virtio)$ ]] && return 0; echo_err "Ошибка: указаный в конфигурации тип диска '$disk_type' не является корректным [ide|sata|scsi|virtio]"; exit_clear; }
+        [[ ! "$1" =~ ^(boot_|)(disk|iso)_?[0-9]+$ ]] && { echo_err "Ошибка: неизвестный параметр ВМ '$1'" && exit_clear; }
         local _exit=false
         case "$disk_type" in
-            ide)    [[ "$disk_num" -le 4  ]] || _exit=true;;
-            sata)   [[ "$disk_num" -le 6  ]] || _exit=true;;
-            scsi)   [[ "$disk_num" -le 31 ]] || _exit=true;;
-            virtio) [[ "$disk_num" -le 16 ]] || _exit=true;;
+            ide)    [[ "$disk_num" -lt 4  ]] || _exit=true;;
+            sata)   [[ "$disk_num" -lt 6  ]] || _exit=true;;
+            scsi)   [[ "$disk_num" -lt 31 ]] || _exit=true;;
+            virtio) [[ "$disk_num" -lt 16 ]] || _exit=true;;
         esac
-        $_exit && { echo_err "Ошибка: невозможно присоедиить больше $((disk_num-1)) дисков типа '$disk_type' к ВМ '$elem'. Выход"; exit 1;}
+        $_exit && { echo_err "Ошибка: невозможно присоедиить больше $disk_num дисков типа '$disk_type' к ВМ '$elem'. Выход"; exit_clear;}
 
-        if [[ "${BASH_REMATCH[1]}" != boot_ ]] && [[ "$2" =~ ^([0-9]+(|\.[0-9]+))\ *([gGГг][bBБб]?)?$ ]]; then
-            cmd_line+=" --${disk_type}${disk_num} '${config_base[storage]}:${BASH_REMATCH[1]},format=$config_disk_format'";
+        if [[ ${BASH_REMATCH[2]} == disk ]]; then
+            if [[ "${BASH_REMATCH[1]}" != boot_ ]] && [[ "$2" =~ ^([0-9]+(|\.[0-9]+))\ *([gGГг][bBБб]?)?$ ]]; then
+                cmd_line+=" --${disk_type}${disk_num} '${config_base[storage]}:${BASH_REMATCH[1]},format=$config_disk_format'";
+            else
+                [[ ${BASH_REMATCH[1]} == boot_ ]] && {
+                    [[ $boot_order ]] && boot_order+=';'
+                    boot_order+="${disk_type}${disk_num}"
+                }
+                local file="$2" disk_opts cmd_disk_opts
+                get_file file || exit_clear
+                if [[ -v vm_config[$1_opt] ]]; then
+                    [[ ${vm_config[$1_opt]} =~ ^\{\ *([^{}]*)\ *\}$ ]] || exit_clear
+                    disk_opts=${BASH_REMATCH[1]}
+                    [[ $disk_opts =~ (^|,\ *)overlay_img\ *=\ *([^, ]+(\ +[^, ]+|))* ]] && {
+                        get_file file '' diff "${BASH_REMATCH[2]}" || exit_clear
+                    }
+                    [[ $disk_opts =~ (^|,\ *)iothread\ *=\ *1($|\ *,) ]] && cmd_disk_opts+=',iothread=1'
+                fi
+                cmd_line+=" --${disk_type}${disk_num} '${config_base[storage]}:0,format=$config_disk_format$cmd_disk_opts,import-from=$file'"
+            fi
         else
+            [[ ${BASH_REMATCH[1]} == boot_ ]] && {
+                [[ $boot_order ]] && boot_order+=';'
+                boot_order+="${disk_type}${disk_num}"
+            }
             local file="$2"
-            get_file file || exit 1
-            cmd_line+=" --${disk_type}${disk_num} '${config_base[storage]}:0,format=$config_disk_format,import-from=$file'"
-            [[ "$boot_order" != '' ]] && boot_order+=';'
-            boot_order+="${disk_type}${disk_num}"
-        fi
+            get_file file '' iso || exit_clear
+            cmd_line+=" --${disk_type}${disk_num} '${config_base[iso_storage]}:iso/$file,media=cdrom'"
 
+        fi
         ((disk_num++))
     }
 
@@ -1319,7 +1340,8 @@ function deploy_stand_config() {
                 startup|tags|ostype|serial[0-3]|agent|scsihw|cpu|cores|memory|bwlimit|description|args|arch|vga|kvm|rng0|acpi|tablet|reboot|startdate|tdf|cpulimit|cpuunits|balloon|hotplug)
                     cmd_line+=" --$opt '${vm_config[$opt]}'";;
                 network*) set_netif_conf "$opt" "${vm_config[$opt]}";;
-                boot_disk*|disk*) set_disk_conf "$opt" "${vm_config[$opt]}";;
+                bios) [[ "${vm_config[$opt]}" == ovmf ]] && cmd_line+=" --bios 'ovmf' --efidisk0 '${config_base[storage]}:0,format=$config_disk_format'" || cmd_line+=" --$opt '${vm_config[$opt]}'";;
+                ?(boot_)@(disk|iso)_+([0-9])) set_disk_conf "$opt" "${vm_config[$opt]}";;
                 access_roles) ${config_base[access_create]} && set_role_config "${vm_config[$opt]}";;
                 machine) set_machine_type "${vm_config[$opt]}";;
                 *) echo_warn "[Предупреждение]: обнаружен неизвестный параметр конфигурации '$opt = ${vm_config[$opt]}' ВМ '$elem'. Пропущен"
