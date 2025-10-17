@@ -1063,26 +1063,39 @@ function run_cmd() {
 
     [[ "$1" == '/noexit' ]] && to_exit=false && shift
     [[ "$1" == '/pipefail' ]] && { set -o pipefail; shift; }
-    [[ "$1" == '' ]] && echo_err 'Ошибка: run_cmd нет команды'
+    [[ "$1" == '' ]] && { echo_err 'Ошибка run_cmd: нет команды'; exit_clear; }
 
-    local cmd_exec="$@"
-    $opt_dry_run && echo_tty "[${c_warning}Выполнение команды${c_null}] $cmd_exec"
-
-    ! $opt_dry_run && {
-        local return_cmd=''
-        if return_cmd=$( eval $cmd_exec 2>&1 ); then
-            $opt_verbose && echo_tty "[${c_lgreen}Выполнена команда${c_null}] ${c_cyan}$cmd_exec${c_null}"
+    if $opt_dry_run; then
+        if ! $opt_verbose && [[ "$1" == pve_api_request || "$1" == pve_tapi_request ]]; then echo_tty "[${c_warning}Выполнение запроса API${c_null}] ${*:3}"
+        else echo_tty "[${c_warning}Выполнение команды${c_null}] $*"; fi
+    else
+        
+        if [[ "$1" == pve_api_request || "$1" == pve_tapi_request ]]; then
+            local code
+            eval "$@" >&2
+            code=$?
+        else
+            local return_cmd code
+            return_cmd=$( eval "$@" 2>&1 )
+            code=$?
+        fi
+        if [[ "$code" == 0 ]]; then
+            $opt_verbose && {
+                if [[ "$1" == pve_api_request || "$1" == pve_tapi_request ]]; then echo_tty "[${c_ok}Выполнен запрос API${c_null}] ${c_info}${*:3}"
+                else echo_tty "[${c_ok}Выполнена команда${c_null}] ${c_info}$*${c_null}"; fi
+            }
         else
             ! $to_exit && {
-                echo_tty "[${c_warning}Выполнена команда${c_null}] ${c_info}$cmd_exec${c_null}"
-                echo_tty "${c_red}Error output: ${c_warning}$return_cmd${c_null}"
-                return 1
+                echo_tty "[${c_warning}Выполнена команда${c_null}] ${c_info}$*${c_null}"
+                return $code
             }
-            echo_err "Ошибка выполнения команды: $cmd_exec"
+            [[ "$1" == pve_api_request || "$1" == pve_tapi_request ]] && echo_tty "[${c_err}Запрос API${c_null}] $3 ${config_base[pve_api_url]}${*:4}"
+            echo_err "Ошибка выполнения команды: $*"
             echo_tty "${c_red}Error output: ${c_warning}$return_cmd${c_null}"
-            exit 1
+            exit_clear
         fi
-    }
+    fi
+    set +o pipefail
     return 0
 }
 
