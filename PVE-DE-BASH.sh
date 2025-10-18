@@ -3,11 +3,10 @@ ex() { ((ex_var++)); echo -n $'\e[m' >> /dev/tty; [[ "$ex_var" == 1 ]] && config
 
 trap ex INT
 
-# Запуск:               sh='PVE-ASDaC-BASH.sh';curl -sOLH 'Cache-Control: no-cache' "https://raw.githubusercontent.com/PavelAF/PVE-ASDaC-BASH/main/$sh"&&chmod +x $sh&&./$sh;rm -f $sh
-
-echo $'\nProxmox VE Automatic stand deployment and configuration script by AF\n' >> /dev/tty
+echo $'\nProxmox VE Automatic stand deployment and configuration script\n' >> /dev/tty
 
 ############################# -= Конфигурация =- #############################
+shopt -s extglob
 
 # Необходимые команды для работы на скрипта
 script_requirements_cmd=( curl qm pvesh pvesm pveum qemu-img kvm md5sum )
