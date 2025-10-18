@@ -3,10 +3,12 @@ ex() { ((ex_var++)); echo -n $'\e[m' >> /dev/tty; [[ "$ex_var" == 1 ]] && config
 
 trap ex INT
 
+# Запуск:               sh='PVE-ASDaC-BASH.sh';curl -sOLH 'Cache-Control: no-cache' "https://raw.githubusercontent.com/PavelAF/PVE-ASDaC-BASH/main/$sh"&&chmod +x $sh&&./$sh;rm -f $sh
+
 echo $'\nProxmox VE Automatic stand deployment and configuration script by AF\n' >> /dev/tty
 
 ############################# -= Конфигурация =- #############################
-shopt -s extglob
+
 # Необходимые команды для работы на скрипта
 script_requirements_cmd=( curl qm pvesh pvesm pveum qemu-img kvm md5sum )
 
@@ -346,32 +348,6 @@ function parse_noborder_table() {
 }
 
 # Объявление основных функций
-function configure_clear() {
-    ! $opt_not_tmpfs && {
-        local lower_nextid
-        ####pve_api_request lower_nextid GET /cluster/options###
-        lower_nextid=$( echo -n "$lower_nextid" | grep -Po '({|,)"next-id":{([^{}\[\]]*?,)?"lower":"\K\d+' )
-        [[ "$lower_nextid" != '' &&  "$lower_nextid" == "$(( ${config_base[start_vmid]} + ${#opt_stand_nums[@]} * 100 ))" ]] #####&& run_cmd pve_api_request return_cmd PUT /cluster/options delete=next-id
-        ex_var=0
-        opt_not_tmpfs=true
-        configure_imgdir clear force
-    }
-    ex_var=1
-}
-
-function exit_clear() { 
-    ((ex_var++))
-    [[ "$ex_var" == 1 ]] && configure_clear
-    echo $'\e[m' > /dev/tty
-    exit ${1-1}
-}
-trap exit_clear EXIT
-
-var_script_pid=$$
-
-function exit_pid() {
-    kill $var_script_pid
-}
 
 function show_help() {
     local t=$'\t'
@@ -1224,48 +1200,28 @@ function deploy_stand_config() {
     }
 
     function set_disk_conf() {
-        [[ "$1" == '' || "$2" == '' && "$1" != test ]] && { echo_err 'Ошибка: set_disk_conf нет аргумента'; exit_clear; }
-        [[ "$1" == 'test' ]] && { [[ "$disk_type" =~ ^(ide|sata|scsi|virtio)$ ]] && return 0; echo_err "Ошибка: указаный в конфигурации тип диска '$disk_type' не является корректным [ide|sata|scsi|virtio]"; exit_clear; }
-        [[ ! "$1" =~ ^(boot_|)(disk|iso)_?[0-9]+$ ]] && { echo_err "Ошибка: неизвестный параметр ВМ '$1'" && exit_clear; }
+        [[ "$1" == '' || "$2" == '' && "$1" != test ]] && echo_err 'Ошибка: set_disk_conf нет аргумента' && exit 1
+        [[ "$1" == 'test' ]] && { [[ "$disk_type" =~ ^(ide|sata|scsi|virtio)$ ]] && return 0; echo_err "Ошибка: указаный в конфигурации тип диска '$disk_type' не является корректным [ide|sata|scsi|virtio]"; exit 1; }
+        [[ ! "$1" =~ ^(boot_|)disk_?[0-9]+ ]] && { echo_err "Ошибка: неизвестный параметр ВМ '$1'" && exit 1; }
         local _exit=false
         case "$disk_type" in
-            ide)    [[ "$disk_num" -lt 4  ]] || _exit=true;;
-            sata)   [[ "$disk_num" -lt 6  ]] || _exit=true;;
-            scsi)   [[ "$disk_num" -lt 31 ]] || _exit=true;;
-            virtio) [[ "$disk_num" -lt 16 ]] || _exit=true;;
+            ide)    [[ "$disk_num" -le 4  ]] || _exit=true;;
+            sata)   [[ "$disk_num" -le 6  ]] || _exit=true;;
+            scsi)   [[ "$disk_num" -le 31 ]] || _exit=true;;
+            virtio) [[ "$disk_num" -le 16 ]] || _exit=true;;
         esac
-        $_exit && { echo_err "Ошибка: невозможно присоедиить больше $disk_num дисков типа '$disk_type' к ВМ '$elem'. Выход"; exit_clear;}
+        $_exit && { echo_err "Ошибка: невозможно присоедиить больше $((disk_num-1)) дисков типа '$disk_type' к ВМ '$elem'. Выход"; exit 1;}
 
-        if [[ ${BASH_REMATCH[2]} == disk ]]; then
-            if [[ "${BASH_REMATCH[1]}" != boot_ ]] && [[ "$2" =~ ^([0-9]+(|\.[0-9]+))\ *([gGГг][bBБб]?)?$ ]]; then
-                cmd_line+=" --${disk_type}${disk_num} '${config_base[storage]}:${BASH_REMATCH[1]},format=$config_disk_format'";
-            else
-                [[ ${BASH_REMATCH[1]} == boot_ ]] && {
-                    [[ $boot_order ]] && boot_order+=';'
-                    boot_order+="${disk_type}${disk_num}"
-                }
-                local file="$2" disk_opts cmd_disk_opts
-                get_file file || exit_clear
-                if [[ -v vm_config[$1_opt] ]]; then
-                    [[ ${vm_config[$1_opt]} =~ ^\{\ *([^{}]*)\ *\}$ ]] || exit_clear
-                    disk_opts=${BASH_REMATCH[1]}
-                    [[ $disk_opts =~ (^|,\ *)overlay_img\ *=\ *([^, ]+(\ +[^, ]+|))* ]] && {
-                        get_file file '' diff "${BASH_REMATCH[2]}" || exit_clear
-                    }
-                    [[ $disk_opts =~ (^|,\ *)iothread\ *=\ *1($|\ *,) ]] && cmd_disk_opts+=',iothread=1'
-                fi
-                cmd_line+=" --${disk_type}${disk_num} '${config_base[storage]}:0,format=$config_disk_format$cmd_disk_opts,import-from=$file'"
-            fi
+        if [[ "${BASH_REMATCH[1]}" != boot_ ]] && [[ "$2" =~ ^([0-9]+(|\.[0-9]+))\ *([gGГг][bBБб]?)?$ ]]; then
+            cmd_line+=" --${disk_type}${disk_num} '${config_base[storage]}:${BASH_REMATCH[1]},format=$config_disk_format'";
         else
-            [[ ${BASH_REMATCH[1]} == boot_ ]] && {
-                [[ $boot_order ]] && boot_order+=';'
-                boot_order+="${disk_type}${disk_num}"
-            }
             local file="$2"
-            get_file file '' iso || exit_clear
-            cmd_line+=" --${disk_type}${disk_num} '${config_base[iso_storage]}:iso/$file,media=cdrom'"
-
+            get_file file || exit 1
+            cmd_line+=" --${disk_type}${disk_num} '${config_base[storage]}:0,format=$config_disk_format,import-from=$file'"
+            [[ "$boot_order" != '' ]] && boot_order+=';'
+            boot_order+="${disk_type}${disk_num}"
         fi
+
         ((disk_num++))
     }
 
@@ -1310,14 +1266,14 @@ function deploy_stand_config() {
         cmd_line+=" --machine '$type'"
     }
 
-    [[ "$1" == '' ]] && { echo_err "Внутренняя ошибка скрипта установки стенда"; exit_clear; }
+    [[ "$1" == '' ]] && echo_err "Внутренняя ошибка скрипта установки стенда" && exit 1
 
     local -n "config_var=config_stand_${opt_sel_var}_var"
     local -A Networking=()
 
     local stand_num=$1
     local vmid=$((${config_base[start_vmid]} + $2 * 100 + 1))
-    [[ "$stands_group" == '' ]] && { echo_err "Ошибка: не указана группа стендов"; exit_clear; }
+    [[ "$stands_group" == '' ]] && { echo_err "Ошибка: не указана группа стендов"; exit 1; }
     local pool_name="${config_base[pool_name]/\{0\}/$stand_num}"
 
     local pve_net_ifs=''
@@ -1335,63 +1291,51 @@ function deploy_stand_config() {
         run_cmd "pveum acl modify '/pool/$pool_name' --users '$username' --roles 'PVEAuditor' --propagate 'false'"
     }
 
-    local cmd_line netifs_type='virtio' netifs_mac disk_type='scsi' disk_num=0 boot_order vm_template vm_name
-    local -A vm_config=()
+    for elem in $(printf '%s\n' "${!config_var[@]}" | grep -P '^[^_]' | sort); do
 
-    for elem in $(printf '%s\n' "${!config_var[@]}" | grep -P 'vm_\d+' | sort -V ); do
+        local cmd_line=''
+        local netifs_type='virtio'
+        local disk_type='scsi'
+        local disk_num=0
+        local boot_order=''
+        local -A vm_config=()
+        local cmd_line="qm create '$vmid' --name '$elem' --pool '$pool_name'"
 
-        netifs_type='virtio'
-        netifs_mac=''
-        disk_type='scsi'
-        disk_num=0
-        boot_order=''
-        vm_config=()
-        vm_template="$( get_dict_value config_stand_${opt_sel_var}_var[$elem] config_template )"
-
-        [[ "$vm_template" != '' ]] && {
-            [[ -v "config_templates[$vm_template]" ]] || { echo_err "Ошибка: шаблон конфигурации '$vm_template' для ВМ '$elem' не найден. Выход"; exit_clear; }
-            get_dict_config "config_templates[$vm_template]" vm_config
-        }
         get_dict_config "config_stand_${opt_sel_var}_var[$elem]" vm_config
-        vm_name="${vm_config[name]}"
-        unset 'vm_config[name]' 'vm_config[os_descr]' 'vm_config[templ_descr]' 'vm_config[config_template]'
 
-        [[ "$vm_name" == '' ]] && vm_name="$elem"
-
-        cmd_line="qm create '$vmid' --name '$vm_name' --pool '$pool_name'"
-
+        [[ "${vm_config[config_template]}" != '' ]] && {
+            [[ -v "config_templates[${vm_config[config_template]}]" ]] || { echo_err "Ошибка: шаблон конфигурации '${vm_config[config_template]}' для ВМ '$elem' не найден. Выход"; exit 1; }
+            get_dict_config "config_templates[${vm_config[config_template]}]" vm_config
+            get_dict_config "config_stand_${opt_sel_var}_var[$elem]" vm_config
+            unset -v 'vm_config[config_template]';
+        }
         [[ "${vm_config[netifs_type]}" != '' ]] && netifs_type="${vm_config[netifs_type]}" && unset -v 'vm_config[netifs_type]'
         [[ "${vm_config[disk_type]}" != '' ]] && disk_type="${vm_config[disk_type]}" && unset -v 'vm_config[disk_type]'
-        [[ "${vm_config[netifs_mac]}" != '' ]] && netifs_mac="${vm_config[netifs_mac]}" && unset -v 'vm_config[netifs_mac]'
 
-        set_netif_conf test && set_disk_conf test || exit_clear
+        set_netif_conf test && set_disk_conf test || exit 1
 
-        for opt in $( printf '%s\n' "${!vm_config[@]}" | sort -V ); do
+        for opt in $(printf '%s\n' "${!vm_config[@]}" | sort); do
             case "$opt" in
-                startup|tags|ostype|serial[0-3]|agent|scsihw|cpu|cores|memory|bwlimit|description|args|arch|vga|kvm|rng0|acpi|tablet|reboot|startdate|tdf|cpulimit|cpuunits|balloon|hotplug)
+                startup|tags|ostype|serial0|serial1|serial2|serial3|agent|scsihw|cpu|cores|memory|bios|bwlimit|description|args|arch|vga|kvm|rng0|acpi|tablet|reboot)
                     cmd_line+=" --$opt '${vm_config[$opt]}'";;
                 network*) set_netif_conf "$opt" "${vm_config[$opt]}";;
-                bios) [[ "${vm_config[$opt]}" == ovmf ]] && cmd_line+=" --bios 'ovmf' --efidisk0 '${config_base[storage]}:0,format=$config_disk_format'" || cmd_line+=" --$opt '${vm_config[$opt]}'";;
-                ?(boot_)@(disk|iso)_+([0-9])) set_disk_conf "$opt" "${vm_config[$opt]}";;
-                access_role) ${config_base[access_create]} && set_role_config "${vm_config[$opt]}";;
+                boot_disk*|disk*) set_disk_conf "$opt" "${vm_config[$opt]}";;
+                access_roles) ${config_base[access_create]} && set_role_config "${vm_config[$opt]}";;
                 machine) set_machine_type "${vm_config[$opt]}";;
-                firewall_opt|?(boot_)@(disk|iso)_+([0-9])_opt|templ_*) continue;;
-                *) echo_warn "[Предупреждение]: обнаружен неизвестный параметр конфигурации '$opt = ${vm_config[$opt]}' ВМ '$vm_name'. Пропущен"
+                *) echo_warn "[Предупреждение]: обнаружен неизвестный параметр конфигурации '$opt = ${vm_config[$opt]}' ВМ '$elem'. Пропущен"
             esac
         done
         [[ "$boot_order" != '' ]] && cmd_line+=" --boot 'order=$boot_order'"
 
-        run_cmd /noexit "$cmd_line" || { echo_err "Ошибка: не удалось создать ВМ '$vm_name' стенда '$pool_name'. Выход"; exit_clear; }
-
-        set_firewall_opt "${vm_config[firewall_opt]}"
+        run_cmd /noexit "$cmd_line " || { echo_err "Ошибка: не удалось создать ВМ '$elem' стенда '$pool_name'. Выход"; exit 1; }
 
         ${config_base[access_create]} && [[ "${vm_config[access_roles]}" != '' ]] && run_cmd "pveum acl modify '/vms/$vmid' --roles '${vm_config[access_roles]}' --users '$username'"
 
-        ${config_base[take_snapshots]} && run_cmd "pvesh create '/nodes/$var_pve_node/qemu/$vmid/snapshot' --snapname 'Start' --description 'Исходное состояние ВМ'"
+        ${config_base[take_snapshots]} && run_cmd /pipefail "qm snapshot '$vmid' 'Start' --description 'Исходное состояние ВМ' | tail -n2"
 
-        ${config_base[run_vm_after_installation]} && manage_bulk_vm_power --add "$var_pve_node" "$vmid"
+        ${config_base[run_vm_after_installation]} && manage_bulk_vm_power --add "$( hostname -s )" "$vmid"
 
-        echo_ok "Конфигурирование ВМ ${c_ok}$vm_name${c_null} (${c_info}$vmid${c_null}) завершено"
+        echo_ok "${c_lcyan}Конфигурирование VM $elem завершено${c_null}"
         ((vmid++))
     done
 
