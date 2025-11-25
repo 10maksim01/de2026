@@ -1,7 +1,6 @@
 
 #!/bin/bash
 
-# Запуск:  branch=main file=PVE-ASDaC-BASH.sh; curl -sOL "https://raw.githubusercontent.com/PavelAF/PVE-ASDaC-BASH/$branch/$file" && chmod +x $file && ./$sh; rm -f $file
 
 ############################# -= Встроенная конфигурация =- #############################
 
