@@ -1351,23 +1351,20 @@ function set_machine_type() {
                 ?(boot_)@(disk|iso)_+([0-9])) set_disk_conf "$opt" "${vm_config[$opt]}";;
                 access_role) ${config_base[access_create]} && set_role_config "${vm_config[$opt]}";;
                 machine) set_machine_type "${vm_config[$opt]}";;
-                firewall_opt|?(boot_)@(disk|iso)_+([0-9])_opt|templ_*) continue;;
                 *) echo_warn "[Предупреждение]: обнаружен неизвестный параметр конфигурации '$opt = ${vm_config[$opt]}' ВМ '$vm_name'. Пропущен"
             esac
         done
         [[ "$boot_order" != '' ]] && cmd_line+=" --boot 'order=$boot_order'"
 
-        run_cmd /noexit "$cmd_line" || { echo_err "Ошибка: не удалось создать ВМ '$vm_name' стенда '$pool_name'. Выход"; exit_clear; }
-
-        #set_firewall_opt "${vm_config[firewall_opt]}"
+        run_cmd /noexit "$cmd_line " || { echo_err "Ошибка: не удалось создать ВМ '$elem' стенда '$pool_name'. Выход"; exit 1; }
 
         ${config_base[access_create]} && [[ "${vm_config[access_roles]}" != '' ]] && run_cmd "pveum acl modify '/vms/$vmid' --roles '${vm_config[access_roles]}' --users '$username'"
 
-        ${config_base[take_snapshots]} && run_cmd "pvesh create '/nodes/$var_pve_node/qemu/$vmid/snapshot' --snapname 'Start' --description 'Исходное состояние ВМ'"
+        ${config_base[take_snapshots]} && run_cmd /pipefail "qm snapshot '$vmid' 'Start' --description 'Исходное состояние ВМ' | tail -n2"
 
-        ${config_base[run_vm_after_installation]} && manage_bulk_vm_power --add "$var_pve_node" "$vmid"
+        ${config_base[run_vm_after_installation]} && manage_bulk_vm_power --add "$( hostname -s )" "$vmid"
 
-        echo_ok "Конфигурирование ВМ ${c_ok}$vm_name${c_null} (${c_info}$vmid${c_null}) завершено"
+        echo_ok "${c_lcyan}Конфигурирование VM $elem завершено${c_null}"
         ((vmid++))
     done
 
