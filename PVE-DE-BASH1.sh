@@ -590,9 +590,9 @@ function get_file() {
     else
         filename=$url
 	}
-#    fi
-#    [[ -r "$filename" ]] || { echo_err "Ошибка: файл '$filename' должен существовать и быть доступен для чтения"; exit 1; }
-#    list_url_files["$md5"]="$url"
+    fi
+    [[ -r "$filename" ]] || { echo_err "Ошибка: файл '$filename' должен существовать и быть доступен для чтения"; exit 1; }
+    list_url_files["$md5"]="$url"
 }
 
 function set_configfile() {
