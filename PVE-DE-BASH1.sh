@@ -589,9 +589,9 @@ function get_file() {
         url="$filename"
     else
         filename=$url
-    fi
-    [[ -r "$filename" ]] || { echo_err "Ошибка: файл '$filename' должен существовать и быть доступен для чтения"; exit 1; }
-    list_url_files["$md5"]="$url"
+#    fi
+#    [[ -r "$filename" ]] || { echo_err "Ошибка: файл '$filename' должен существовать и быть доступен для чтения"; exit 1; }
+#    list_url_files["$md5"]="$url"
 }
 
 function set_configfile() {
@@ -1245,9 +1245,9 @@ function deploy_stand_config() {
                 [[ $boot_order ]] && boot_order+=';'
                 boot_order+="${disk_type}${disk_num}"
             }
-            local file="$2"
-            get_file file '' iso || exit_clear
-            cmd_line+=" --${disk_type}${disk_num} 'local:iso/$file,media=cdrom'"
+#            local file="$2"
+#            get_file file '' iso || exit_clear
+            cmd_line+=" --${disk_type}${disk_num} 'local:iso/$filename,media=cdrom'"
 
         fi
         ((disk_num++))
